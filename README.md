@@ -11,7 +11,7 @@ Numerical reproduction of Olofsson & Gonoskov, *Attaining a strong-field QED sig
 
 1. Gaussian source model.
 2. Mirror reflection + vectorial focal-field integral: the complex phasor $E_c(x,y,z)$ at $\omega_0$, including the local-normal polarization rotation $\mathbf{E}^p = \mathbf{E} - 2(\mathbf{E}\cdot\mathbf{N})\mathbf{N}$. No scalar-paraxial code past the parabola — FFT-style propagation shapes the beam *before* the mirror only.
-3. $\kappa_{\mathrm{eff}}(f\#)$ sweep → comparison with Fig. 4. Headline plot; starts from the analytic Sheppard–Larkin input.
+3. $\kappa_{\mathrm{eff}}(f\text{-number})$ sweep → comparison with Fig. 4. Headline plot; starts from the analytic Sheppard–Larkin input.
 4. Paraxial shaping pipeline: thin lens $t(r) = e^{-ikr^2/2f}$, apodizer, propagation $U' = \mathcal{F}^{-1}\{\mathcal{F}\{U\}\,e^{-i\Delta z(k_x^2+k_y^2)/2k}\}$.
 5. Apodizer transmission / power accounting.
 
