@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Field pack metadata",
+  "type": "object",
+  "required": [
+    "schema_version", "grid", "freqs", "power_W", "f_number",
+    "lambda0_m", "pol", "pulse", "checks"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+
+    "grid": {
+      "type": "object",
+      "required": ["x0_m", "dx_m", "Nx", "y0_m", "dy_m", "Ny", "z0_m", "dz_m", "Nz"],
+      "description": "Uniform grid, axes slow-to-fast: (Nf, Nz, Ny, Nx).",
+      "properties": {
+        "x0_m": {"type": "number"}, "dx_m": {"type": "number"}, "Nx": {"type": "integer"},
+        "y0_m": {"type": "number"}, "dy_m": {"type": "number"}, "Ny": {"type": "integer"},
+        "z0_m": {"type": "number"}, "dz_m": {"type": "number"}, "Nz": {"type": "integer"}
+      }
+    },
+
+    "freqs": {
+      "type": "array",
+      "description": "Angular frequencies omega_k (rad/s), one per Nf slice, increasing. Nf=1: monochromatic + envelope from 'pulse'. Nf>1: pulse already synthesized from the stack.",
+      "items": {"type": "number", "exclusiveMinimum": 0},
+      "minItems": 1, "maxItems": 32
+    },
+
+    "power_W": {"type": "number", "description": "Power delivered to the focus (after apodizer/truncation losses)."},
+    "f_number": {"type": "number", "exclusiveMinimum": 0},
+    "lambda0_m": {"type": "number", "exclusiveMinimum": 0},
+
+    "pol": {"enum": ["z-linear", "circular"], "description": "z-linear = bidipole requirement; circular: a_max^CP = a_max/sqrt(2), cut alpha > 0.7 a_max^CP/gamma."},
+
+    "pulse": {
+      "type": "object",
+      "required": ["model", "convention"],
+      "description": "Envelope g(t); intensity FWHM convention (sigma_t is the FIELD-envelope sigma = tau_fwhm/sqrt(4 ln 2) ~ tau_fwhm/1.665).",
+      "properties": {
+        "model": {"enum": ["gauss", "none"]},
+        "convention": {"const": "intensity_fwhm"},
+        "tau_fwhm_s": {"type": "number", "exclusiveMinimum": 0},
+        "sigma_t_s": {"type": "number", "exclusiveMinimum": 0},
+        "t_ref_s": {"type": "number", "default": 0}
+      }
+    },
+
+    "checks": {
+      "type": "object",
+      "required": ["a_max", "a_max_expected", "chi_max_per_GeV", "power_conservation_rel_err", "max_location_m"],
+      "description": "A's self-validation; B's loader must verify a_max and power_conservation against the loaded arrays and abort on mismatch.",
+      "properties": {
+        "a_max": {"type": "number", "description": "Peak amplitude in a0 = eE/(mc*omega0), from the stack."},
+        "a_max_expected": {"type": "number", "description": "Theory: ~550*sqrt(P/1PW) at f/0.25."},
+        "chi_max_per_GeV": {"type": "number", "description": "kappa_eff; compare with digitized Fig. 4."},
+        "power_conservation_rel_err": {"type": "number"},
+        "max_location_m": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+      }
+    }
+  }
+}
