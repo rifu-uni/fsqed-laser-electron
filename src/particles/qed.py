@@ -12,9 +12,9 @@ from scipy.special import gamma as gamma_func
 from scipy.special import kv
 
 from .chi import compute_chi_numba, compute_deviation_angle_numba
-from .constants import ALPHA_FS, C_LIGHT, HBAR, MC2_GEV, MC2_J, MC_KGMS, period_from_lambda
+from .constants import ALPHA_FS, C_LIGHT, HBAR, MC2_GEV, MC2_J, MC_KGMS
 from .fields import FieldPack, evaluate_eb_numba
-from .pusher import ElectronBatch, step_boris_numba, step_vay_numba
+from .pusher import ElectronBatch, build_simulation_time_grid, step_boris_numba, step_vay_numba
 
 # W0 = alpha_fs * m_e * c^2 / (sqrt(3) * pi * hbar)
 W0_LCFA_PER_S: float = (ALPHA_FS * MC2_J) / (math.sqrt(3.0) * math.pi * HBAR)
@@ -246,8 +246,7 @@ def _interp_table_1d_numba(chi: float, log_chi_grid: np.ndarray, values: np.ndar
         return values[0] * (chi / chi_min)
     lc = math.log(chi)
     if lc >= log_chi_grid[n - 1]:
-        # Extrapolate with chi^(2/3) scaling above chi_max
-        return values[n - 1] * math.exp((2.0 / 3.0) * (lc - log_chi_grid[n - 1]))
+        return values[n - 1]
     d_lc = (log_chi_grid[n - 1] - log_chi_grid[0]) / (n - 1)
     u = (lc - log_chi_grid[0]) / d_lc
     idx = int(math.floor(u))
@@ -264,6 +263,11 @@ def _lookup_g_rate_numba(chi: float, log_chi_grid: np.ndarray, g_rate: np.ndarra
     chi_min = math.exp(log_chi_grid[0])
     if chi < chi_min:
         return _ASymptote_G_COEFF * chi
+    lc = math.log(chi)
+    n = log_chi_grid.shape[0]
+    if lc >= log_chi_grid[n - 1]:
+        # Extrapolate total emission rate G(chi) with chi^(2/3) scaling above chi_max
+        return g_rate[n - 1] * math.exp((2.0 / 3.0) * (lc - log_chi_grid[n - 1]))
     return _interp_table_1d_numba(chi, log_chi_grid, g_rate)
 
 
@@ -819,39 +823,17 @@ def simulate_qed_ensemble(
     chi_max_ref: float | None = None,
 ) -> QEDResult:
     """Propagate an ElectronBatch through a FieldPack with stochastic or weighted LCFA QED."""
-    del chi_max_ref  # Reserved for caller convenience; selection cuts take chi_max explicitly
+    if chi_max_ref is not None and (not math.isfinite(chi_max_ref) or chi_max_ref <= 0.0):
+        raise ValueError(f"chi_max_ref must be finite and positive when provided, got {chi_max_ref}")
     if mode not in ("monte_carlo", "weighted"):
         raise ValueError(f"mode must be 'monte_carlo' or 'weighted', got {mode!r}")
     if method not in ("vay", "boris"):
         raise ValueError(f"method must be 'vay' or 'boris', got {method!r}")
-    if batch.r0_m.shape[0] < 1:
-        raise ValueError("ElectronBatch must contain at least 1 electron")
 
-    t0_s = period_from_lambda(pack.lambda0_m)
-    dt_max_s = t0_s / 20.0
-    dt_eff = (t0_s / 40.0) if dt_s is None else float(dt_s)
-    if not math.isfinite(dt_eff) or dt_eff <= 0.0 or dt_eff > dt_max_s:
-        raise ValueError(
-            f"dt_s ({dt_eff:.6e} s) must satisfy 0 < dt_s <= T0/20 ({dt_max_s:.6e} s)"
-        )
-
-    v0_y = C_LIGHT * math.sqrt(1.0 - 1.0 / (batch.gamma0 * batch.gamma0))
-    y_start = float(batch.r0_m[0, 1])
-    y_grid_end = pack.grid.y0_m + (pack.grid.Ny - 1) * pack.grid.dy_m
-
-    t_start = (pack.pulse.t_ref_s + y_start / v0_y) if t_start_s is None else float(t_start_s)
-    if t_end_s is None:
-        t_end = pack.pulse.t_ref_s + y_grid_end / v0_y
-        if t_end <= t_start:
-            t_end = t_start + ((pack.grid.Ny - 1) * pack.grid.dy_m) / v0_y
-    else:
-        t_end = float(t_end_s)
-
-    if not (math.isfinite(t_start) and math.isfinite(t_end)) or t_end <= t_start:
-        raise ValueError(f"t_end_s ({t_end}) must be finite and greater than t_start_s ({t_start})")
-
-    n_steps = max(2, int(math.ceil((t_end - t_start) / dt_eff)) + 1)
-    t_s = t_start + np.arange(n_steps, dtype=np.float64) * dt_eff
+    t_s, dt_eff = build_simulation_time_grid(
+        pack, batch, dt_s=dt_s, t_start_s=t_start_s, t_end_s=t_end_s
+    )
+    n_steps = t_s.shape[0]
 
     tbl = _get_default_lcfa_table() if table is None else table
     use_gauss_env = (pack.freqs.size == 1) and (pack.pulse.model == "gauss")
@@ -996,7 +978,22 @@ def apply_selection_cuts(
     if gamma0 is not None and (not math.isfinite(gamma0) or gamma0 <= 1.0):
         raise ValueError(f"gamma0 must be finite and > 1.0, got {gamma0}")
 
-    n_ph = catalog.delta_init.size
+    catalog_arrays = (
+        catalog.energy_gev,
+        catalog.delta_init,
+        catalog.alpha_rad,
+        catalog.chi_emit,
+        catalog.gamma_prior,
+        catalog.gamma0,
+        catalog.b_impact_m,
+        catalog.weight,
+        catalog.t_emit_s,
+        catalog.particle_idx,
+    )
+    n_ph = catalog.delta_init.shape[0]
+    for arr in catalog_arrays:
+        if arr.ndim != 1 or arr.shape[0] != n_ph:
+            raise ValueError("All PhotonCatalog arrays must be 1D with matching length")
     if n_ph == 0:
         empty = np.zeros(0, dtype=bool)
         return {"total_mask": empty, "signal_mask": empty}

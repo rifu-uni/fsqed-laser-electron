@@ -82,6 +82,20 @@ class PulseSpec:
     sigma_t_s: float
     t_ref_s: float = 0.0
 
+    def __post_init__(self) -> None:
+        if self.model not in ("gauss", "none"):
+            raise ValueError(f"pulse.model must be 'gauss' or 'none', got {self.model!r}")
+        if self.convention != "intensity_fwhm":
+            raise ValueError(f"pulse.convention must be 'intensity_fwhm', got {self.convention!r}")
+        if not (
+            math.isfinite(self.tau_fwhm_s)
+            and math.isfinite(self.sigma_t_s)
+            and math.isfinite(self.t_ref_s)
+        ):
+            raise ValueError("PulseSpec timing parameters must be finite")
+        if self.model == "gauss" and (self.tau_fwhm_s <= 0.0 or self.sigma_t_s <= 0.0):
+            raise ValueError("PulseSpec with model='gauss' requires positive tau_fwhm_s and sigma_t_s")
+
 
 @dataclass(frozen=True)
 class FieldChecks:
@@ -92,6 +106,21 @@ class FieldChecks:
     chi_max_per_GeV: float
     power_conservation_rel_err: float
     max_location_m: tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        if not (
+            math.isfinite(self.a_max)
+            and math.isfinite(self.a_max_expected)
+            and math.isfinite(self.chi_max_per_GeV)
+            and math.isfinite(self.power_conservation_rel_err)
+            and len(self.max_location_m) == 3
+            and all(math.isfinite(v) for v in self.max_location_m)
+        ):
+            raise ValueError("FieldChecks values must be finite")
+        if self.a_max <= 0.0 or self.a_max_expected <= 0.0 or self.chi_max_per_GeV <= 0.0:
+            raise ValueError("FieldChecks amplitude/chi fields must be positive")
+        if self.power_conservation_rel_err < 0.0:
+            raise ValueError("power_conservation_rel_err must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -109,6 +138,19 @@ class FieldPack:
     pulse: PulseSpec
     checks: FieldChecks
     metadata_raw: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        expected = (self.freqs.size, 3, self.grid.Nz, self.grid.Ny, self.grid.Nx)
+        if self.Ec.shape != expected or self.Bc.shape != expected:
+            raise ValueError(f"Ec/Bc shapes must match {expected}, got {self.Ec.shape}, {self.Bc.shape}")
+        if self.pol not in ("z-linear", "circular"):
+            raise ValueError(f"pol must be 'z-linear' or 'circular', got {self.pol!r}")
+        if not (
+            math.isfinite(self.power_W)
+            and math.isfinite(self.f_number)
+            and math.isfinite(self.lambda0_m)
+        ) or self.power_W <= 0.0 or self.f_number <= 0.0 or self.lambda0_m <= 0.0:
+            raise ValueError("power_W, f_number, and lambda0_m must be finite and positive")
 
 
 def _load_schema(schema_path: str | Path | None) -> dict[str, Any]:
@@ -175,6 +217,8 @@ def _parse_pulse_spec(pulse_raw: dict[str, Any]) -> PulseSpec:
             t_ref_s=t_ref_s,
         )
 
+    if model != "none":
+        raise ValueError(f"Unsupported pulse.model: {model!r}")
     tau_fwhm_s = float(pulse_raw.get("tau_fwhm_s", 0.0))
     sigma_t_s = float(pulse_raw.get("sigma_t_s", 0.0))
     return PulseSpec(
@@ -429,6 +473,15 @@ def evaluate_eb_numba(
     t_ref_s: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Trilinearly interpolate complex phasors and synthesize real E (V/m) and B (T) at (r, t)."""
+    if not (
+        math.isfinite(x_m)
+        and math.isfinite(y_m)
+        and math.isfinite(z_m)
+        and math.isfinite(t_s)
+        and math.isfinite(dt_jitter_s)
+    ):
+        raise ValueError("Non-finite coordinate or time passed to evaluate_eb_numba")
+
     ux = (x_m - x0_m) / dx_m
     uy = (y_m - y0_m) / dy_m
     uz = (z_m - z0_m) / dz_m
@@ -519,8 +572,8 @@ def evaluate_eb(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate real electric (V/m) and magnetic (T) fields at a single 3D point and time."""
     r_arr = np.asarray(r_m, dtype=np.float64)
-    if r_arr.shape != (3,):
-        raise ValueError(f"r_m must have shape (3,), got {r_arr.shape}")
+    if r_arr.shape != (3,) or not np.all(np.isfinite(r_arr)):
+        raise ValueError(f"r_m must be finite with shape (3,), got {r_arr.shape}")
     if not (math.isfinite(t_s) and math.isfinite(dt_jitter_s)):
         raise ValueError("t_s and dt_jitter_s must be finite")
 
@@ -611,8 +664,8 @@ def evaluate_eb_batch(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate real E (V/m) and B (T) fields at a batch of points with shape (N, 3)."""
     r_arr = np.asarray(r_m_batch, dtype=np.float64)
-    if r_arr.ndim != 2 or r_arr.shape[1] != 3:
-        raise ValueError(f"r_m_batch must have shape (N, 3), got {r_arr.shape}")
+    if r_arr.ndim != 2 or r_arr.shape[1] != 3 or not np.all(np.isfinite(r_arr)):
+        raise ValueError(f"r_m_batch must be finite with shape (N, 3), got {r_arr.shape}")
     if not math.isfinite(t_s):
         raise ValueError(f"t_s must be finite, got {t_s}")
 
@@ -777,7 +830,6 @@ def make_analytic_bidipole_pack(
             A_BIDIPOLE_1PW_1UM
             * (kappa_eff / KAPPA_BIDIPOLE_MAX)
             * math.sqrt(power_w / 1.0e15)
-            * (1.0e-6 / lambda0_m)
         )
     else:
         scale_cp = e_max_lp / math.sqrt(2.0)
@@ -788,7 +840,6 @@ def make_analytic_bidipole_pack(
             (A_BIDIPOLE_1PW_1UM / math.sqrt(2.0))
             * (kappa_eff / KAPPA_BIDIPOLE_MAX)
             * math.sqrt(power_w / 1.0e15)
-            * (1.0e-6 / lambda0_m)
         )
 
     freqs = np.array([omega0], dtype=np.float64)

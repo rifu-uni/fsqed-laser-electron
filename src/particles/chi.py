@@ -168,6 +168,10 @@ def compute_fig2_phase_space(
         )
     if not (np.all(np.isfinite(alpha_arr)) and np.all(np.isfinite(chi_arr))):
         raise ValueError("alpha_traces and chi_traces must contain finite values")
+    if np.any(chi_arr < 0.0):
+        raise ValueError("chi_traces must be non-negative")
+    if not signed_alpha and np.any(alpha_arr < 0.0):
+        raise ValueError("alpha_traces contains negative values with signed_alpha=False")
     if not math.isfinite(a_max) or a_max <= 0.0:
         raise ValueError(f"a_max must be finite and positive, got {a_max}")
     if not math.isfinite(gamma0) or gamma0 <= 1.0:

@@ -12,6 +12,7 @@ from .constants import (
     E_CHARGE,
     E_CRIT,
     KAPPA_BIDIPOLE_MAX,
+    MC2_GEV,
     energy_gev_to_gamma,
 )
 
@@ -160,7 +161,7 @@ def fig4_reference_curve(
 
     scale = energy_gev * math.sqrt(power_w / 1.0e15) * (1.0e-6 / lambda_m)
     chi_max = kappa * scale
-    gamma = energy_gev_to_gamma(energy_gev) if energy_gev > 0.001 else energy_gev / 0.00051099895
+    gamma = energy_gev_to_gamma(energy_gev) if energy_gev > MC2_GEV else energy_gev / MC2_GEV
     field_strength_vm = (chi_max * E_CRIT) / (2.0 * gamma)
     field_strength_1e14_vm = field_strength_vm / 1.0e14
 

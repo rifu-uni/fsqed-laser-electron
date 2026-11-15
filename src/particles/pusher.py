@@ -318,18 +318,14 @@ def _propagate_ensemble_numba(
     return r_trace, p_trace, gamma_trace, chi_trace, alpha_trace
 
 
-def propagate_ensemble(
+def build_simulation_time_grid(
     pack: FieldPack,
     batch: ElectronBatch,
     dt_s: float | None = None,
     t_start_s: float | None = None,
     t_end_s: float | None = None,
-    method: str = "vay",
-    signed_alpha: bool = False,
-) -> TrajectoryResult:
-    """Propagate an ElectronBatch through a FieldPack without QED recoil."""
-    if method not in ("vay", "boris"):
-        raise ValueError(f"method must be 'vay' or 'boris', got {method!r}")
+) -> tuple[np.ndarray, float]:
+    """Build uniform simulation time grid (t_s, dt_eff) bounded within [t_start, t_end]."""
     if batch.r0_m.shape[0] < 1:
         raise ValueError("ElectronBatch must contain at least 1 electron")
 
@@ -356,8 +352,27 @@ def propagate_ensemble(
     if not (math.isfinite(t_start) and math.isfinite(t_end)) or t_end <= t_start:
         raise ValueError(f"t_end_s ({t_end}) must be finite and greater than t_start_s ({t_start})")
 
-    n_steps = max(2, int(math.ceil((t_end - t_start) / dt_eff)) + 1)
+    n_steps = max(2, int(math.floor((t_end - t_start) / dt_eff + 1.0e-12)) + 1)
     t_s = t_start + np.arange(n_steps, dtype=np.float64) * dt_eff
+    return t_s, dt_eff
+
+
+def propagate_ensemble(
+    pack: FieldPack,
+    batch: ElectronBatch,
+    dt_s: float | None = None,
+    t_start_s: float | None = None,
+    t_end_s: float | None = None,
+    method: str = "vay",
+    signed_alpha: bool = False,
+) -> TrajectoryResult:
+    """Propagate an ElectronBatch through a FieldPack without QED recoil."""
+    if method not in ("vay", "boris"):
+        raise ValueError(f"method must be 'vay' or 'boris', got {method!r}")
+
+    t_s, dt_eff = build_simulation_time_grid(
+        pack, batch, dt_s=dt_s, t_start_s=t_start_s, t_end_s=t_end_s
+    )
 
     use_gauss_env = (pack.freqs.size == 1) and (pack.pulse.model == "gauss")
     sigma_t = pack.pulse.sigma_t_s if use_gauss_env else 1.0
