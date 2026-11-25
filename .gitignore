@@ -224,3 +224,5 @@ __marimo__/
 
 # local
 fields/**/*.npz
+data/f*.npz
+GUIA_COMMIT.md
