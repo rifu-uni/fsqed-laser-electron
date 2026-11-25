@@ -15,13 +15,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-SRC = Path(__file__).resolve().parents[1]
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from optics import constants as C  # noqa: E402
-from optics import focus  # noqa: E402
-from optics import sweep  # noqa: E402
+from src.optics import constants as C  # noqa: E402
+from src.optics import focus  # noqa: E402
+from src.optics import sweep  # noqa: E402
 
 OUT = Path(__file__).resolve().parents[2] / "images"
 
@@ -64,11 +64,39 @@ def colorize(z: np.ndarray, cmap, vmin: float, vmax: float) -> np.ndarray:
     return rgb.astype(np.uint8)
 
 
-def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    for name in (("arialbd.ttf" if bold else "arial.ttf"), ("segoeuib.ttf" if bold else "segoeui.ttf")):
-        p = Path("C:/Windows/Fonts") / name
-        if p.exists():
+_BOLD_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+)
+
+_REGULAR_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+)
+
+
+def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Load a cross-platform TrueType font, falling back to Pillow's default."""
+    if size <= 0:
+        raise ValueError(f"Font size must be positive, got {size}")
+    candidates = (
+        (*_BOLD_FONT_CANDIDATES, *_REGULAR_FONT_CANDIDATES)
+        if bold
+        else _REGULAR_FONT_CANDIDATES
+    )
+    for font_path in candidates:
+        p = Path(font_path)
+        if not p.is_file():
+            continue
+        try:
             return ImageFont.truetype(str(p), size)
+        except OSError:
+            continue
     return ImageFont.load_default()
 
 

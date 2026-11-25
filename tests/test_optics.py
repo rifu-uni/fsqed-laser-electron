@@ -11,14 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
-SRC = Path(__file__).resolve().parents[1] / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from optics import constants as C  # noqa: E402
-from optics import focus  # noqa: E402
-from optics import metadata as meta_mod  # noqa: E402
-from optics import sweep  # noqa: E402
+from src.optics import constants as C  # noqa: E402
+from src.optics import focus  # noqa: E402
+from src.optics import metadata as meta_mod  # noqa: E402
+from src.optics import sweep  # noqa: E402
 
 LAM = 0.8e-6
 F_NUMBER = 0.25
