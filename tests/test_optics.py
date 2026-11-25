@@ -10,11 +10,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.optics import cli  # noqa: E402
 from src.optics import constants as C  # noqa: E402
 from src.optics import focus  # noqa: E402
 from src.optics import metadata as meta_mod  # noqa: E402
@@ -97,6 +99,13 @@ def test_far_field_is_transverse():
     E = focus.bi_dipole_far_field(n)
     dot = np.sum(n * E, axis=-1)
     assert np.max(np.abs(dot)) < 1e-12
+
+
+def test_circular_pol_rejected_loudly():
+    params = cli.default_parameters()
+    params["pol"] = "circular"
+    with pytest.raises(NotImplementedError, match="z-linear"):
+        cli.generate_field_pack(params)
 
 
 def _run_all():

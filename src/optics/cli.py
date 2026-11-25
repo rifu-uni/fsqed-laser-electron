@@ -46,6 +46,13 @@ def default_parameters() -> dict:
 
 def generate_field_pack(params: dict) -> dict:
     """Compute the focal field pack and return the (validated) metadata JSON dict."""
+    pol = params["pol"]
+    if pol != "z-linear":
+        raise NotImplementedError(
+            f"pol={pol!r} is not yet implemented in src.optics; "
+            "only 'z-linear' is currently supported (see AGENTS.md for circular polarization plan)."
+        )
+
     lambda0_m = params["lambda0_m"]
     f_number = params["f_number"]
     power_w = params["power_w"]
@@ -100,7 +107,12 @@ def main(argv=None) -> int:
     parser.add_argument("--lambda0-m", type=float, default=0.8e-6)
     parser.add_argument("--f-number", type=float, default=0.25)
     parser.add_argument("--power-w", type=float, default=1.0e15)
-    parser.add_argument("--pol", choices=["z-linear", "circular"], default="z-linear")
+    parser.add_argument(
+        "--pol",
+        choices=["z-linear"],
+        default="z-linear",
+        help="Polarization mode (currently only 'z-linear' is implemented; 'circular' is planned).",
+    )
     parser.add_argument("--n-cycles", type=float, default=5.0)
     parser.add_argument("--energy-gev", type=float, default=1.0)
     parser.add_argument("--nx", type=int, default=64)
