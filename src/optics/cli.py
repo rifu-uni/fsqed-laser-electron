@@ -36,7 +36,7 @@ def default_parameters() -> dict:
         "n_cycles": 5.0,              # 5-cycle pulse (FWHM intensity)
         "energy_gev": 1.0,            # reference electron energy for chi
         "nx": 64, "ny": 64, "nz": 64,
-        "span_xy_m": 4.0e-6,
+        "span_xy_m": 6.4e-6,
         "span_y_m": 4.0e-6,
         "ntheta": 32,
         "nphi": 64,
@@ -106,7 +106,7 @@ def main(argv=None) -> int:
     parser.add_argument("--nx", type=int, default=64)
     parser.add_argument("--ny", type=int, default=64)
     parser.add_argument("--nz", type=int, default=64)
-    parser.add_argument("--span-xy-m", type=float, default=4.0e-6)
+    parser.add_argument("--span-xy-m", type=float, default=6.4e-6)
     parser.add_argument("--span-y-m", type=float, default=4.0e-6)
     parser.add_argument("--ntheta", type=int, default=32)
     parser.add_argument("--nphi", type=int, default=64)

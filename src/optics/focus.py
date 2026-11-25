@@ -403,11 +403,12 @@ def compute_checks(
     ]
 
     # Power conservation across two different y planes.
+    # The laser propagates along -y, so the Poynting flux p0 is negative.
     if B is not None:
         nyy = E.shape[2]  # y axis of (3, nz, ny, nx)
         p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=nyy // 2)
         p1 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=max(nyy // 4, 0))
-        p_err = float(abs(p0 - p1) / p0) if p0 > 0.0 else 0.0
+        p_err = float(abs(p0 - p1) / abs(p0)) if abs(p0) > 0.0 else 0.0
     else:
         p_err = 0.0
 
