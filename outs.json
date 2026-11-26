@@ -1,15 +1,15 @@
 {
   "schema_version": "1.0",
   "grid": {
-    "x0_m": -2e-06,
-    "dx_m": 6.25e-08,
-    "Nx": 64,
-    "y0_m": -2e-06,
-    "dy_m": 6.25e-08,
-    "Ny": 64,
-    "z0_m": -2e-06,
-    "dz_m": 6.25e-08,
-    "Nz": 64
+    "x0_m": -1.6e-06,
+    "dx_m": 1e-07,
+    "Nx": 32,
+    "y0_m": -1.6e-06,
+    "dy_m": 1e-07,
+    "Ny": 32,
+    "z0_m": -1.6e-06,
+    "dz_m": 1e-07,
+    "Nz": 32
   },
   "freqs": [
     2354564459136066.5
@@ -21,14 +21,14 @@
   "pulse": {
     "model": "gauss",
     "convention": "intensity_fwhm",
-    "tau_fwhm_s": 1.3342563807926082e-14,
-    "sigma_t_s": 8.013026190181542e-15,
+    "tau_fwhm_s": 3e-14,
+    "sigma_t_s": 1.8016836131796746e-14,
     "t_ref_s": 0.0
   },
   "checks": {
-    "a_max": 517.6483160524886,
+    "a_max": 509.7673673067425,
     "a_max_expected": 551.543289325507,
-    "chi_max_per_GeV": 6.144706405537045,
+    "chi_max_per_GeV": 6.051156180919325,
     "power_conservation_rel_err": 0.0,
     "max_location_m": [
       0.0,
@@ -38,5 +38,13 @@
   },
   "convention": "Re[E * exp(i*omega*t)]",
   "theta_max_rad": 1.5707963267948966,
-  "n_cycles": 5.0
+  "mode": "gaussian",
+  "w0_over_rmax": 0.7,
+  "apod_order": 8.0,
+  "degradation": {
+    "mse": 0.7271367701659123,
+    "correlation": 0.9999100023166931,
+    "transmission": 0.981960787976708,
+    "f_number": 0.25
+  }
 }

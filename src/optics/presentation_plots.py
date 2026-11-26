@@ -354,22 +354,29 @@ def image_profile(out: Path, slices) -> None:
     )
 
 
-def image_kappa_sweep(out: Path) -> None:
+def image_kappa_sweep(out):
     fns = np.concatenate(([0.25], np.geomspace(0.35, 4.0, 12)))
-    res = sweep.kappa_eff_vs_f_number(
+    ideal = sweep.kappa_eff_vs_f_number(
         fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0, ntheta=128, nphi=256,
     )
-    f = np.array([r["f_number"] for r in res])
-    chi = np.array([r["chi_max_per_GeV"] for r in res])
+    gauss = sweep.kappa_eff_vs_f_number(
+        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0,
+        far_field_builder=sweep.gaussian_far_field_builder(), ntheta=128, nphi=256,
+    )
+    f = np.array([r['f_number'] for r in ideal])
+    chi_i = np.array([r['chi_max_per_GeV'] for r in ideal])
+    chi_g = np.array([r['chi_max_per_GeV'] for r in gauss])
     draw_line_plot(
         out,
-        [{"x": f, "y": chi, "label": "χ_max por GeV", "color": (30, 80, 200)}],
-        title="χ_max en función del f-number (Fig. 4)",
-        xlabel="f-number  L/(2 R_max)", ylabel="χ_max por GeV",
+        [
+            {'x': f, 'y': chi_i, 'label': 'ideal (Sheppard-Larkin)', 'color': (30, 80, 200)},
+            {'x': f, 'y': chi_g, 'label': 'realista (gaussiano + espejo)', 'color': (200, 30, 40)},
+        ],
+        title='chi_max vs f-number: ideal vs realista',
+        xlabel='f-number  L/(2 R_max)', ylabel='chi_max por GeV',
         xlog=True,
-        hlines=[{"y": 5.25, "color": (180, 30, 30), "label": "límite bi-dipolo κ = 5.25"}],
+        hlines=[{'y': 5.25, 'color': (180, 30, 30), 'label': 'limite bi-dipolo k = 5.25'}],
     )
-
 
 def image_farfield(out: Path) -> None:
     th = np.linspace(0.0, np.pi / 2, 300)

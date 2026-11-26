@@ -191,9 +191,11 @@ def focal_field_angular_spectrum(
 
     # Debye integral: E(r) = -(i/lambda) C sum_{theta,phi} w far(n) e^{-ik n.r}.
     pref = -1j * Cscale / lambda0_m
-    amp = pref * w[..., None] * far  # (ntheta, nphi, 3)
+    amp = pref * w[..., None] * far  # (ntheta, nphi, 3) -- E plane-wave amplitudes
+    amp_B = (1.0 / C.C_LIGHT) * pref * w[..., None] * np.cross(n, far)  # B = (1/c) n x E
 
     Ec = np.zeros((3, nz, ny, nx), dtype=np.complex128)
+    Bc = np.zeros((3, nz, ny, nx), dtype=np.complex128)
     for i in range(ntheta):
         sth = np.sin(th[i])
         # Phase factors that depend only on phi (shared by the theta ring).
@@ -204,8 +206,7 @@ def focal_field_angular_spectrum(
             phase = gz[j][:, None, None] * ph_y[None, :, None] * gx[j][None, None, :]
             for comp in range(3):
                 Ec[comp] += amp[i, j, comp] * phase
-
-    Bc = magnetic_field_from_curl(Ec, dx, dy, dz, omega)
+                Bc[comp] += amp_B[i, j, comp] * phase
 
     grid = {
         "x0_m": float(x0), "dx_m": float(dx), "Nx": int(nx),
@@ -402,13 +403,13 @@ def compute_checks(
         float(grid["z0_m"] + iz * grid["dz_m"]),
     ]
 
-    # Power conservation across two different y planes.
-    # The laser propagates along -y, so the Poynting flux p0 is negative.
+    # Energy conservation: the near-field Poynting flux through the focal plane
+    # must match the far-field power used for normalization (= power_w).  The
+    # residual reflects the finite transverse-grid truncation (beam wings
+    # outside the window), not a field error (the direct Debye B is exact).
     if B is not None:
-        nyy = E.shape[2]  # y axis of (3, nz, ny, nx)
-        p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=nyy // 2)
-        p1 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=max(nyy // 4, 0))
-        p_err = float(abs(p0 - p1) / abs(p0)) if abs(p0) > 0.0 else 0.0
+        p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=E.shape[2] // 2)
+        p_err = float(abs(abs(p0) - power_w) / power_w)
     else:
         p_err = 0.0
 
@@ -424,3 +425,71 @@ def compute_checks(
     }
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Realistic optical pipeline: Gaussian beam + apodizer + mirror reflection.
+# --------------------------------------------------------------------------- #
+def mirror_reflection_far_field(n, *, f_number, incident_amplitude):
+    """Reflect a z-linear-polarized collimated beam off the parabola -> far field.
+
+    Maps the mirror radius ``R = 2 L tan(theta/2)`` to the ray direction ``n``, applies
+    the local-normal polarization reflection ``E^p = E - 2 (E . N) N`` and the
+    energy-conserving amplitude apodization ``2 / (1 + cos(theta))`` of the parabolic
+    mirror.
+
+    Parameters
+    ----------
+    n : np.ndarray, shape (..., 3)
+        Unit direction from the focus toward the mirror (``n_y < 0`` hemisphere).
+    f_number : float
+        Mirror f-number ``L/(2 R_max)`` (defines the aperture ``theta_max``).
+    incident_amplitude : callable
+        ``incident_amplitude(r) -> amplitude`` at normalized radius ``r = R/R_max``.
+
+    Returns
+    -------
+    np.ndarray, shape (..., 3)
+        Far-field electric phasor ``(Ex, Ey, Ez)`` (dimensionless shape).
+    """
+    ny = n[..., 1]
+    cos_theta = np.clip(-ny, 0.0, 1.0)  # n_y = -cos(theta)
+    theta = np.arccos(cos_theta)
+    theta_max = f_number_to_theta_max(f_number)
+    r_over_rmax = np.tan(theta / 2.0) / np.tan(theta_max / 2.0)
+
+    E_in = np.zeros_like(n)
+    E_in[..., 2] = incident_amplitude(r_over_rmax)  # z-linear polarization
+    E_refl = reflect(E_in, mirror_normal(n))
+    apod = 2.0 / (1.0 + cos_theta)
+    return E_refl * apod[..., None]
+
+
+def ideal_far_field(n, *, f_number):
+    """Ideal Sheppard-Larkin far field, obtained by reflecting I^p(R) (eq. 13).
+
+    This reproduces :func:`bi_dipole_far_field` (eqs. 9-10) up to a constant factor,
+    which is a self-consistency check of the mirror-reflection pipeline.
+    """
+    from .gaussian import ideal_incident_amplitude
+
+    return mirror_reflection_far_field(
+        n,
+        f_number=f_number,
+        incident_amplitude=lambda r: ideal_incident_amplitude(r, f_number=f_number),
+    )
+
+
+def gaussian_far_field(n, *, f_number, w0_over_rmax=0.7, apod_order=8.0):
+    """Realistic far field: a Gaussian beam shaped by an apodizer, reflected off the
+    parabolic mirror.  This is the full optical pipeline (input beam + optical system).
+    """
+    from .gaussian import gaussian_incident_amplitude
+
+    return mirror_reflection_far_field(
+        n,
+        f_number=f_number,
+        incident_amplitude=lambda r: gaussian_incident_amplitude(
+            r, w0_over_rmax=w0_over_rmax, apod_order=apod_order
+        ),
+    )

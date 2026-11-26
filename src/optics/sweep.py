@@ -2,9 +2,13 @@
 
 Fig. 4 plots ``chi_max`` as a function of the parabolic-mirror f-number for
 ``P = 1 PW``, ``eps = 1 GeV`` and ``lambda = 1 um``, with the peak electric/magnetic
-field on the right axis.  The curve starts from the analytic Sheppard-Larkin
-(bi-dipole) input and saturates at ``kappa ~ 5.25`` for ``f-number <= 0.25`` (the full
-``-y`` hemisphere).
+field on the right axis.
+
+The far-field model is supplied through a *builder* ``far_field_builder(f_number) ->
+callable(n)`` because the realistic (Gaussian + apodizer + mirror) far field depends on
+the f-number (which defines the mirror aperture ``theta_max``).  Two builders are
+provided: :func:`ideal_far_field_builder` (analytic Sheppard-Larkin baseline) and
+:func:`gaussian_far_field_builder` (realistic optical pipeline).
 
 ``chi_max`` scales as ``chi ~ eps * lambda^-1 * P^{1/2}``; ``a0`` (the field strength in
 relativistic units) scales as ``P^{1/2}`` and is wavelength-independent for a fixed
@@ -54,22 +58,46 @@ def focal_field_vector(
     return E0
 
 
+def ideal_far_field_builder():
+    """Builder for the analytic Sheppard-Larkin baseline (independent of f-number)."""
+    def build(f_number):
+        return focus.bi_dipole_far_field
+    return build
+
+
+def gaussian_far_field_builder(w0_over_rmax: float = 0.7, apod_order: float = 8.0):
+    """Builder for the realistic Gaussian + apodizer + mirror pipeline."""
+    def build(f_number):
+        def far(n):
+            return focus.gaussian_far_field(
+                n, f_number=f_number, w0_over_rmax=w0_over_rmax, apod_order=apod_order
+            )
+        return far
+    return build
+
+
 def kappa_eff_vs_f_number(
     f_numbers,
     *,
     lambda0_m: float = 1.0e-6,
     power_w: float = 1.0e15,
     energy_gev: float = 1.0,
-    far_field=None,
+    far_field_builder=None,
     ntheta: int = 256,
     nphi: int = 512,
 ) -> list[dict]:
     """Compute ``chi_max`` and ``a_max`` for each f-number (the Fig. 4 curve).
 
+    Parameters
+    ----------
+    far_field_builder : callable, optional
+        ``far_field_builder(f_number) -> far_field(n)``.  Defaults to the ideal
+        Sheppard-Larkin baseline.
+
     Returns a list of dicts with keys ``f_number``, ``chi_max_per_GeV``, ``a_max``.
     """
-    if far_field is None:
-        far_field = focus.bi_dipole_far_field
+    if far_field_builder is None:
+        far_field_builder = ideal_far_field_builder()
 
     omega = C.omega_from_lambda(lambda0_m)
     E_rel = C.relativistic_field_scale(omega)
@@ -77,6 +105,7 @@ def kappa_eff_vs_f_number(
 
     out = []
     for fn in f_numbers:
+        far_field = far_field_builder(fn)
         E0 = focal_field_vector(
             far_field, f_number=fn, lambda0_m=lambda0_m, power_w=power_w,
             ntheta=ntheta, nphi=nphi,

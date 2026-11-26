@@ -4,36 +4,66 @@ Numerical reproduction of Olofsson & Gonoskov, *Attaining a strong-field QED sig
 
 ## Modules
 
->[!warning]
-> clanker draft
-
 `src/optics/`
 
-1. Gaussian source model.
-2. Mirror reflection + vectorial focal-field integral: the complex phasor $E_c(x,y,z)$ at $\omega_0$, including the local-normal polarization rotation $\mathbf{E}^p = \mathbf{E} - 2(\mathbf{E}\cdot\mathbf{N})\mathbf{N}$. No scalar-paraxial code past the parabola — FFT-style propagation shapes the beam *before* the mirror only.
-3. $\kappa_{\mathrm{eff}}(f\text{-number})$ sweep → comparison with Fig. 4. Headline plot; starts from the analytic Sheppard–Larkin input.
-4. Paraxial shaping pipeline: thin lens $t(r) = e^{-ikr^2/2f}$, apodizer, propagation $U' = \mathcal{F}^{-1}\{\mathcal{F}\{U\}\,e^{-i\Delta z(k_x^2+k_y^2)/2k}\}$.
-5. Apodizer transmission / power accounting.
+1. Gaussian source model (`gaussian.py`): a collimated Gaussian beam, configurable for
+   FSQED lasers (tens-of-fs pulse duration, PW-class peak power).
+2. Realistic optical pipeline (`focus.py`): the Gaussian beam is shaped by an apodizer
+   and reflected off the parabolic mirror via the local-normal polarization rotation
+   `E^p = E - 2 (E . N) N` (mirror normal `N = (y_hat - n)/|y_hat - n|`), then
+   propagated through the vectorial Debye focal-field integral (non-paraxial) to obtain
+   the complex phasor `Ec(x, y, z)`.
+3. Ideal baseline: the analytic Sheppard-Larkin far field (eqs. 9-10, equivalent to
+   reflecting the intensity profile `I^p(R) ~ ((R/2L)^2 + 1)^-4` of eq. 13) is kept as
+   the theoretical reference for comparison.
+4. `kappa_eff(f-number)` sweep (Fig. 4) for *both* models.
+5. Quantitative comparison (`comparison.py`): mean squared error (MSE), Pearson
+   correlation and apodizer power transmission between the realistic and ideal
+   incident-beam profiles.
 
 `src/particles/`
 
-1. Electron trajectory pusher (Boris/Vay), impact parameter sampled from $p(b) = 2b/b_{\max}^2$, timing jitter $\delta t$ per shot.
-2. $\chi(b,t)$ traces and the time fraction $F = \tfrac{1}{T}\int\Theta\!\left[\chi - \chi_{\max}/2\right]dt$.
-3. QED extension: stochastic photon emission from $W_{\mathrm{rad}}(\gamma,\chi)$, photon energy and deviation angle $\alpha \sim a_{\max}/\gamma$, selection cuts, $\sigma = N_{\mathrm{signal}}/n_e\tau_l c$ and $\eta = N_{\mathrm{signal}}/N_{\mathrm{total}}$.
-4. Shot-count / $3\sigma$ statistics; benchmark digitization (Figs. 4–5).
+1. Electron trajectory pusher (Boris/Vay), impact parameter sampled from `p(b) = 2b/b_max^2`, timing jitter `delta t` per shot.
+2. `chi(b,t)` traces and the time fraction `F = (1/T) int Theta[chi - chi_max/2] dt`.
+3. QED extension: stochastic photon emission from `W_rad(gamma, chi)`, photon energy and deviation angle `alpha ~ a_max/gamma`, selection cuts, `sigma = N_signal/n_e tau_l c` and `eta = N_signal/N_total`.
+4. Shot-count / `3 sigma` statistics; benchmark digitization (Figs. 4-5).
+
+## Execution modes
+
+The optics module exposes two execution modes through the CLI
+(`python -m optics`, or `python src/optics/cli.py`):
+
+```bash
+# Realistic optical pipeline (default): Gaussian beam + apodizer + mirror reflection
+python -m optics --mode gaussian --power-w 1e15 --tau-fwhm-s 30e-15 --w0-over-rmax 0.7 --apod-order 8
+
+# Ideal analytic baseline: Sheppard-Larkin far field injected directly
+python -m optics --mode ideal
+```
+
+For the Gaussian mode, the output metadata includes a `degradation` block with the MSE,
+the Pearson correlation and the apodizer transmission against the ideal Sheppard-Larkin
+profile.  The `kappa_eff(f-number)` sweep can be run for both modes with
+`optics.sweep.kappa_eff_vs_f_number(..., far_field_builder=...)`.
 
 ### Schema
 
-The particles module receives field packs. A pack is one `.npz` file per $f$-number (`data/f{fnumber}.npz`, gitignored) containing `Ec` (required), `Bc` (optional), and `metadata` (a JSON string validated by `data/schema.json`):
+The particles module receives field packs. A pack is one `.npz` file per f-number
+(`data/f{fnumber}.npz`, gitignored) containing `Ec` (required), `Bc` (optional), and
+`metadata` (a JSON string validated by `data/schema.json`):
 
-- `Ec`: `(Nf, 3, Nz, Ny, Nx)` `complex128` electric field phasor in $\mathrm{V/m}$ (vector components `(Ex, Ey, Ez)` on axis `1`). Legacy 4D `(Nf, Nz, Ny, Nx)` scalar $E_z$ packs are auto-promoted by the loader when `pol == "z-linear"`.
-- `Bc` (optional): `(Nf, 3, Nz, Ny, Nx)` `complex128` magnetic field phasor in $\mathrm{T}$. If omitted from the `.npz` pack, `src/particles` reconstructs $\mathbf{B}_c^{(k)} = \frac{i}{\omega_k}\nabla \times \mathbf{E}_c^{(k)}$ on load via central finite differences.
+- `Ec`: `(Nf, 3, Nz, Ny, Nx)` `complex128` electric field phasor in V/m (vector
+  components `(Ex, Ey, Ez)` on axis 1). Legacy 4D scalar `Ez` packs are auto-promoted
+  by the loader when `pol == "z-linear"`.
+- `Bc` (optional): `(Nf, 3, Nz, Ny, Nx)` `complex128` magnetic field phasor in T. If
+  omitted, `src/particles` reconstructs `Bc = (i/omega) curl Ec` on load.
 
 Time is never passed as data, but reconstructed using
 
-$$\mathbf{E}(x,y,z,t) = g(t) \sum_k \mathrm{Re}\!\left[\mathbf{E}_c^{(k)}(x,y,z)\, e^{+i\omega_k t}\right]$$
+    E(x,y,z,t) = g(t) sum_k Re[ Ec^(k)(x,y,z) exp(+i omega_k t) ]
 
-at the pusher's own timestep ($\Delta t \le T_0/20$, $\lesssim 0.13\,\mathrm{fs}$ at 800 nm). Timing jitter is a per-shot phase/time shift $\delta t$.
+at the pusher's own timestep (`dt <= T0/20`, `~0.13 fs` at 800 nm). Timing jitter is a
+per-shot phase/time shift `delta t`.
 
 ### Metadata
 
@@ -50,11 +80,21 @@ Also validated at load time.
 
 ## Development and execution
 
-Package management is done via `pixi`. Each module is independent from each other, then imported into centralized execution notebooks. CLI entrypoints are optional.
+Package management is done via `pixi`. Each module is independent from each other, then
+imported into centralized execution notebooks.
+
+Run the tests with:
+
+```bash
+python -m pytest -q
+```
 
 ## Conventions (global)
 
-- SI units in all data; relativistic amplitudes ($a_0 = eE/mc\omega_0$) only as derived reporting quantities.
-- Phasor convention: $E = \mathrm{Re}[E_c\, e^{+i\omega t}]$.
-- Grid axes slow-to-fast: `(Nf, Nz, Ny, Nx)`. Electron along $+\hat{y}$; laser incident along $-\hat{y}$; polarization along $\hat{z}$.
-- Pulse durations quoted as **intensity FWHM** (the paper's convention); the field-envelope sigma is $\sigma_t = \tau_{\mathrm{FWHM}}/\sqrt{4\ln 2} \approx \tau_{\mathrm{FWHM}}/1.665$. The schema pins this.
+- SI units in all data; relativistic amplitudes (`a0 = eE/mc/omega0`) only as derived
+  reporting quantities.
+- Phasor convention: `E = Re[Ec * exp(+i omega t)]`.
+- Grid axes slow-to-fast: `(Nf, Nz, Ny, Nx)`. Electron along `+y`; laser incident along
+  `-y`; polarization along `z`.
+- Pulse durations quoted as **intensity FWHM**; the field-envelope sigma is
+  `sigma_t = tau_fwhm / sqrt(4 ln 2) ~ tau_fwhm / 1.665`.

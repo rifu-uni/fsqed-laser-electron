@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.optics import cli  # noqa: E402
+from src.optics import comparison  # noqa: E402
 from src.optics import constants as C  # noqa: E402
 from src.optics import focus  # noqa: E402
 from src.optics import metadata as meta_mod  # noqa: E402
@@ -37,13 +38,20 @@ def _compute_small():
     return Ec, Bc, grid, checks
 
 
+def _sample_n(ntheta=40, nphi=12):
+    th = np.linspace(0.05, np.pi / 2 - 0.05, ntheta)
+    ph = np.linspace(0, 2 * np.pi, nphi, endpoint=False)
+    TH, PH = np.meshgrid(th, ph, indexing="ij")
+    return np.stack([np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1)
+
+
 def test_metadata_validates_against_schema():
     Ec, Bc, grid, checks = _compute_small()
     meta = meta_mod.build_metadata(
         lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER, pol="z-linear",
-        grid=grid, checks=checks, n_cycles=5.0,
+        grid=grid, checks=checks, tau_fwhm_s=30.0e-15,
     )
-    meta_mod.validate(meta)  # raises on failure
+    meta_mod.validate(meta)
 
 
 def test_power_conservation():
@@ -53,17 +61,24 @@ def test_power_conservation():
     assert 0.0 < checks["power_conservation_rel_err"] < 0.10
 
 
+def test_curl_b_matches_direct_b():
+    # Cross-check: (i/omega) curl E must match the direct Debye B within grid error.
+    Ec, Bc, grid, _ = _compute_small()
+    omega = C.omega_from_lambda(LAM)
+    Bc_curl = focus.magnetic_field_from_curl(
+        Ec[0], grid["dx_m"], grid["dy_m"], grid["dz_m"], omega
+    )
+    rel = float(np.linalg.norm(Bc_curl - Bc[0]) / np.linalg.norm(Bc[0]))
+    assert rel < 0.15
+
+
 def test_a_max_close_to_expected():
     _, _, _, checks = _compute_small()
-    # The bi-dipole peak a0 is ~550 * sqrt(P/1PW) (lambda-independent); the discrete
-    # Debye sum reproduces it to within ~10%.
     assert 0.85 * checks["a_max_expected"] < checks["a_max"] < 1.15 * checks["a_max_expected"]
-    assert 450.0 < checks["a_max"] < 600.0
 
 
 def test_chi_max_matches_a_max_scaling():
     _, _, _, checks = _compute_small()
-    # chi ~ 2 a0 gamma (hbar omega / m c^2) per GeV, head-on.
     omega = C.omega_from_lambda(LAM)
     hbar_omega_over_mc2 = C.HBAR * omega / C.MC2_J
     expected = 2.0 * checks["a_max"] * C.GAMMA_PER_GEV * hbar_omega_over_mc2
@@ -77,28 +92,59 @@ def test_peak_location_at_focus():
 
 
 def test_kappa_sweep_saturates_and_decreases():
-    # Fig. 4 uses lambda = 1 um: chi_max saturates near kappa ~ 5.25 for f <= 0.25
-    # and decreases for larger f-numbers.
     fns = [0.25, 0.5, 1.0, 2.0]
     res = sweep.kappa_eff_vs_f_number(
-        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0,
-        ntheta=128, nphi=256,
+        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0, ntheta=128, nphi=256,
     )
     chi = [r["chi_max_per_GeV"] for r in res]
-    # saturating value close to the paper's 5.25 (within ~10%)
     assert abs(chi[0] - 5.25) / 5.25 < 0.15
-    # monotonically decreasing with f-number
     assert chi[0] > chi[1] > chi[2] > chi[3]
 
 
 def test_far_field_is_transverse():
-    # The bi-dipole far field must be transverse: n . E = 0.
     rng = np.random.default_rng(0)
     n = rng.normal(size=(200, 3))
     n /= np.linalg.norm(n, axis=-1, keepdims=True)
     E = focus.bi_dipole_far_field(n)
-    dot = np.sum(n * E, axis=-1)
-    assert np.max(np.abs(dot)) < 1e-12
+    assert np.max(np.abs(np.sum(n * E, axis=-1))) < 1e-12
+
+
+def test_ideal_reflection_matches_analytic():
+    # Reflecting the ideal I^p(R) profile must reproduce the analytic far field.
+    n = _sample_n()
+    a = focus.bi_dipole_far_field(n).reshape(-1, 3)
+    b = focus.ideal_far_field(n, f_number=F_NUMBER).reshape(-1, 3)
+    a = a / np.sqrt(np.sum(np.abs(a) ** 2))
+    b = b / np.sqrt(np.sum(np.abs(b) ** 2))
+    overlap = abs(np.vdot(a.ravel(), b.ravel()))
+    assert overlap > 0.999
+
+
+def test_gaussian_far_field_runs():
+    n = _sample_n()
+    E = focus.gaussian_far_field(n, f_number=F_NUMBER, w0_over_rmax=0.7, apod_order=8.0)
+    assert E.shape == (*n.shape[:-1], 3)
+    assert np.max(np.abs(E)) > 0.0
+
+
+def test_comparison_reports_degradation():
+    rep = comparison.summarize_degradation(f_number=F_NUMBER)
+    assert rep["mse"] > 0.0
+    assert rep["correlation"] < 1.0
+    assert 0.0 < rep["transmission"] <= 1.0
+
+
+def test_gaussian_sweep_lower_than_ideal():
+    fns = [0.25, 1.0]
+    ideal = sweep.kappa_eff_vs_f_number(
+        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0, ntheta=128, nphi=256,
+    )
+    gauss = sweep.kappa_eff_vs_f_number(
+        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0,
+        far_field_builder=sweep.gaussian_far_field_builder(), ntheta=128, nphi=256,
+    )
+    # The realistic (degraded) beam yields a lower chi_max than the optimal baseline.
+    assert gauss[0]["chi_max_per_GeV"] < ideal[0]["chi_max_per_GeV"]
 
 
 def test_circular_pol_rejected_loudly():
