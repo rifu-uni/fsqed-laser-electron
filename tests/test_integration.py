@@ -16,21 +16,24 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.optics import cli
 from src.particles import (
+    compute_sigma_and_eta,
     e_field_to_a0,
     evaluate_eb,
     load_field_pack,
     propagate_ensemble,
     sample_electron_batch,
+    simulate_qed_ensemble,
 )
 
 SCHEMA_PATH = REPO_ROOT / "data" / "schema.json"
 
 
-def _make_small_optics_pack(mode: str = "gaussian") -> dict:
+def _make_small_optics_pack(mode: str = "gaussian", pol: str = "z-linear") -> dict:
     """Generate a compact optics focal-field pack for integration testing."""
     params = cli.default_parameters()
     params.update(
         mode=mode,
+        pol=pol,
         nx=32,
         ny=32,
         nz=32,
@@ -71,17 +74,20 @@ def test_optics_npz_matches_particles_schema_and_contract(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("mode", ["gaussian", "ideal"])
-def test_raw_optics_pack_loads_in_particles(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize("pol", ["z-linear", "circular"])
+def test_raw_optics_pack_loads_in_particles(tmp_path: Path, mode: str, pol: str) -> None:
     """Verify unmodified optics packs load directly via load_field_pack."""
-    pack = _make_small_optics_pack(mode=mode)
+    pack = _make_small_optics_pack(mode=mode, pol=pol)
     npz_path = cli.save_field_pack(pack, out_dir=tmp_path)
-    load_field_pack(npz_path)
+    loaded = load_field_pack(npz_path)
+    assert loaded.pol == pol
 
 
 @pytest.mark.parametrize("mode", ["gaussian", "ideal"])
-def test_optics_pack_propagates_in_particles(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize("pol", ["z-linear", "circular"])
+def test_optics_pack_propagates_in_particles(tmp_path: Path, mode: str, pol: str) -> None:
     """Verify optics pack loads, evaluates, and pushes electrons cleanly."""
-    pack = _make_small_optics_pack(mode=mode)
+    pack = _make_small_optics_pack(mode=mode, pol=pol)
     npz_path = cli.save_field_pack(pack, out_dir=tmp_path)
     loaded = load_field_pack(npz_path)
 
@@ -106,3 +112,30 @@ def test_optics_pack_propagates_in_particles(tmp_path: Path, mode: str) -> None:
     assert np.all(np.isfinite(traj.gamma))
     assert np.all(np.isfinite(traj.chi))
     assert float(np.max(traj.chi)) > 0.0
+
+
+def test_circular_optics_pack_qed_selection_cuts(tmp_path: Path) -> None:
+    """Verify CP optics pack drives QED simulation and CP selection cuts cleanly."""
+    pack = _make_small_optics_pack(mode="gaussian", pol="circular")
+    npz_path = cli.save_field_pack(pack, out_dir=tmp_path)
+    loaded = load_field_pack(npz_path)
+
+    batch = sample_electron_batch(
+        n_particles=16,
+        energy_gev=10.0,
+        b_max_m=1.0 * loaded.lambda0_m,
+        y0_m=loaded.grid.y0_m,
+        rng=np.random.default_rng(7),
+    )
+    res = simulate_qed_ensemble(loaded, batch, mode="weighted", method="vay")
+    obs = compute_sigma_and_eta(
+        res.photons,
+        pol=loaded.pol,
+        a_max=loaded.checks.a_max,
+        chi_max=loaded.checks.chi_max_per_GeV * batch.energy_gev,
+        b_max_m=batch.b_max_m,
+        n_electrons=batch.r0_m.shape[0],
+    )
+    assert res.photons.weight.size > 0
+    assert np.isfinite(obs["sigma_cm2"]) and obs["sigma_cm2"] >= 0.0
+    assert np.isfinite(obs["eta"]) and 0.0 <= obs["eta"] <= 1.0

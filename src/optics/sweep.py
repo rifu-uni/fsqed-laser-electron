@@ -58,21 +58,34 @@ def focal_field_vector(
     return E0
 
 
-def ideal_far_field_builder():
+def ideal_far_field_builder(pol: str = "z-linear"):
     """Builder for the analytic Sheppard-Larkin baseline (independent of f-number)."""
+    focus._validate_pol(pol)
+
     def build(f_number):
-        return focus.bi_dipole_far_field
+        return lambda n: focus.bi_dipole_far_field(n, pol=pol)
+
     return build
 
 
-def gaussian_far_field_builder(w0_over_rmax: float = 0.7, apod_order: float = 8.0):
+def gaussian_far_field_builder(
+    w0_over_rmax: float = 0.7, apod_order: float = 8.0, pol: str = "z-linear"
+):
     """Builder for the realistic Gaussian + apodizer + mirror pipeline."""
+    focus._validate_pol(pol)
+
     def build(f_number):
         def far(n):
             return focus.gaussian_far_field(
-                n, f_number=f_number, w0_over_rmax=w0_over_rmax, apod_order=apod_order
+                n,
+                f_number=f_number,
+                w0_over_rmax=w0_over_rmax,
+                apod_order=apod_order,
+                pol=pol,
             )
+
         return far
+
     return build
 
 
@@ -110,9 +123,17 @@ def kappa_eff_vs_f_number(
             far_field, f_number=fn, lambda0_m=lambda0_m, power_w=power_w,
             ntheta=ntheta, nphi=nphi,
         )
-        a_max = float(np.max(np.abs(E0)) / E_rel)
-        e_perp = float(np.sqrt(np.abs(E0[0]) ** 2 + np.abs(E0[2]) ** 2))
-        chi_max_per_gev = 2.0 * gamma * e_perp / C.E_CRIT / energy_gev
+        # Exact peak instantaneous real field amplitude over an optical cycle
+        # (matches LP amplitude and E_lp / sqrt(2) for circular polarization).
+        e_abs2 = float(np.sum(np.abs(E0) ** 2))
+        e_dot_abs = float(abs(np.dot(E0, E0)))
+        e_peak = float(np.sqrt(0.5 * (e_abs2 + e_dot_abs)))
+        a_max = e_peak / E_rel
+
+        e_perp_abs2 = float(abs(E0[0]) ** 2 + abs(E0[2]) ** 2)
+        e_perp_dot_abs = float(abs(E0[0] ** 2 + E0[2] ** 2))
+        e_perp_peak = float(np.sqrt(0.5 * (e_perp_abs2 + e_perp_dot_abs)))
+        chi_max_per_gev = 2.0 * gamma * e_perp_peak / C.E_CRIT / energy_gev
         out.append({"f_number": float(fn), "chi_max_per_GeV": chi_max_per_gev, "a_max": a_max})
     return out
 

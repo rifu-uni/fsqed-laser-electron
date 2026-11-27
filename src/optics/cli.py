@@ -54,23 +54,20 @@ def default_parameters() -> dict:
 def build_far_field(params: dict):
     """Return the ``far_field(n)`` callable for the chosen execution mode."""
     fn = params["f_number"]
+    pol = focus._validate_pol(params["pol"])
     if params["mode"] == "ideal":
-        return focus.bi_dipole_far_field
+        return lambda n: focus.bi_dipole_far_field(n, pol=pol)
     return lambda n: focus.gaussian_far_field(
         n, f_number=fn,
         w0_over_rmax=params["w0_over_rmax"],
         apod_order=params["apod_order"],
+        pol=pol,
     )
 
 
 def generate_field_pack(params: dict) -> dict:
     """Compute the focal field pack and return the (validated) metadata dict."""
-    pol = params["pol"]
-    if pol != "z-linear":
-        raise NotImplementedError(
-            f"pol={pol!r} is not yet implemented in src.optics; "
-            "only 'z-linear' is currently supported (see AGENTS.md for circular polarization plan)."
-        )
+    pol = focus._validate_pol(params["pol"])
 
     lambda0_m = params["lambda0_m"]
     f_number = params["f_number"]
@@ -86,9 +83,10 @@ def generate_field_pack(params: dict) -> dict:
         nx=params["nx"], ny=params["ny"], nz=params["nz"],
         span_xy_m=params["span_xy_m"], span_y_m=params["span_y_m"],
         ntheta=params["ntheta"], nphi=params["nphi"], far_field=far_field,
+        pol=pol,
     )
     checks = focus.compute_checks(
-        Ec, lambda0_m=lambda0_m, power_w=power_w, grid=grid, Bc=Bc
+        Ec, lambda0_m=lambda0_m, power_w=power_w, grid=grid, Bc=Bc, pol=pol
     )
     extra: dict = {"mode": params["mode"]}
     if params["mode"] == "gaussian":
@@ -131,9 +129,9 @@ def main(argv=None) -> int:
     parser.add_argument("--power-w", type=float, default=1.0e15)
     parser.add_argument(
         "--pol",
-        choices=["z-linear"],
+        choices=["z-linear", "circular"],
         default="z-linear",
-        help="Polarization mode (currently only 'z-linear' is implemented; 'circular' is planned).",
+        help="Polarization mode: 'z-linear' (LP) or 'circular' (CP).",
     )
     parser.add_argument("--tau-fwhm-s", type=float, default=30.0e-15)
     parser.add_argument("--n-cycles", type=float, default=None, help="Optional pulse duration in optical cycles (overrides --tau-fwhm-s).")

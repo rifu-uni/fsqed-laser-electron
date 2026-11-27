@@ -189,11 +189,82 @@ def test_gaussian_sweep_lower_than_ideal():
     assert gauss[0]["chi_max_per_GeV"] < ideal[0]["chi_max_per_GeV"]
 
 
-def test_circular_pol_rejected_loudly():
+def test_invalid_pol_rejected():
+    with pytest.raises(ValueError, match="pol must be"):
+        focus.bi_dipole_far_field(_sample_n(), pol="elliptical")
     params = cli.default_parameters()
-    params["pol"] = "circular"
-    with pytest.raises(NotImplementedError, match="z-linear"):
+    params["pol"] = "elliptical"
+    with pytest.raises(ValueError, match="pol must be"):
         cli.generate_field_pack(params)
+
+
+def test_circular_far_field_transverse_and_matches_mirror_reflection():
+    n = _sample_n()
+    a = focus.bi_dipole_far_field(n, pol="circular")
+    assert np.max(np.abs(np.sum(n * a, axis=-1))) < 1e-12
+    b = focus.ideal_far_field(n, f_number=F_NUMBER, pol="circular")
+    a_flat = a.reshape(-1, 3)
+    b_flat = b.reshape(-1, 3)
+    a_flat = a_flat / np.sqrt(np.sum(np.abs(a_flat) ** 2))
+    b_flat = b_flat / np.sqrt(np.sum(np.abs(b_flat) ** 2))
+    assert abs(np.vdot(a_flat.ravel(), b_flat.ravel())) > 0.999
+
+
+def test_circular_focal_field_amplitudes_phase_and_power():
+    for mode in ("ideal", "gaussian"):
+        ff_lp = (
+            (lambda n: focus.bi_dipole_far_field(n, pol="z-linear"))
+            if mode == "ideal"
+            else (lambda n: focus.gaussian_far_field(n, f_number=F_NUMBER, pol="z-linear"))
+        )
+        ff_cp = (
+            (lambda n: focus.bi_dipole_far_field(n, pol="circular"))
+            if mode == "ideal"
+            else (lambda n: focus.gaussian_far_field(n, f_number=F_NUMBER, pol="circular"))
+        )
+        ec_lp, bc_lp, grid = focus.focal_field_angular_spectrum(
+            lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER,
+            nx=24, ny=24, nz=24, span_xy_m=6.4e-6, span_y_m=3.2e-6,
+            ntheta=24, nphi=48, far_field=ff_lp, pol="z-linear",
+        )
+        ec_cp, bc_cp, _ = focus.focal_field_angular_spectrum(
+            lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER,
+            nx=24, ny=24, nz=24, span_xy_m=6.4e-6, span_y_m=3.2e-6,
+            ntheta=24, nphi=48, far_field=ff_cp, pol="circular",
+        )
+        chk_lp = focus.compute_checks(ec_lp, lambda0_m=LAM, power_w=POWER, grid=grid, Bc=bc_lp, pol="z-linear")
+        chk_cp = focus.compute_checks(ec_cp, lambda0_m=LAM, power_w=POWER, grid=grid, Bc=bc_cp, pol="circular")
+
+        inv_sqrt2 = 1.0 / np.sqrt(2.0)
+        assert np.isclose(chk_cp["a_max"] / chk_lp["a_max"], inv_sqrt2, rtol=1e-6)
+        assert np.isclose(chk_cp["chi_max_per_GeV"] / chk_lp["chi_max_per_GeV"], inv_sqrt2, rtol=1e-6)
+        assert 0.0 < chk_cp["power_conservation_rel_err"] < 0.10
+
+        ic = 12
+        ef = ec_cp[0, :, ic, ic, ic]
+        bf = bc_cp[0, :, ic, ic, ic]
+        assert ef[2].real > 0.0 and abs(ef[2].imag) < 1e-12 * ef[2].real
+        assert np.isclose(ef[0], 1j * ef[2], rtol=1e-12)
+        assert np.isclose(bf[0], -ef[2] / C.C_LIGHT, rtol=1e-12)
+        assert np.isclose(bf[2], 1j * ef[2] / C.C_LIGHT, rtol=1e-12)
+
+        # Circular polarization maintains constant |E(0, t)| across the optical cycle.
+        phases = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+        mags = [np.linalg.norm(np.real(ef * np.exp(1j * ph))) for ph in phases]
+        assert np.allclose(mags, mags[0], rtol=1e-12)
+
+
+def test_circular_sweep_scales_by_inv_sqrt2():
+    fns = [0.25, 1.0]
+    for builder_lp, builder_cp in (
+        (sweep.ideal_far_field_builder("z-linear"), sweep.ideal_far_field_builder("circular")),
+        (sweep.gaussian_far_field_builder(pol="z-linear"), sweep.gaussian_far_field_builder(pol="circular")),
+    ):
+        lp = sweep.kappa_eff_vs_f_number(fns, lambda0_m=1.0e-6, power_w=POWER, far_field_builder=builder_lp, ntheta=64, nphi=128)
+        cp = sweep.kappa_eff_vs_f_number(fns, lambda0_m=1.0e-6, power_w=POWER, far_field_builder=builder_cp, ntheta=64, nphi=128)
+        for row_lp, row_cp in zip(lp, cp):
+            assert np.isclose(row_cp["a_max"] / row_lp["a_max"], 1.0 / np.sqrt(2.0), rtol=1e-6)
+            assert np.isclose(row_cp["chi_max_per_GeV"] / row_lp["chi_max_per_GeV"], 1.0 / np.sqrt(2.0), rtol=1e-6)
 
 
 def test_focal_field_slice_matches_3d_center_plane():

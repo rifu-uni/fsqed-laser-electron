@@ -33,10 +33,19 @@ import numpy as np
 from . import constants as C
 
 
+_VALID_POLS = ("z-linear", "circular")
+
+
+def _validate_pol(pol: str) -> str:
+    if pol not in _VALID_POLS:
+        raise ValueError(f"pol must be one of {_VALID_POLS}, got {pol!r}")
+    return pol
+
+
 # --------------------------------------------------------------------------- #
 # Analytic bi-dipole far field (Sheppard-Larkin input), eqs. (9)-(10).
 # --------------------------------------------------------------------------- #
-def bi_dipole_far_field(n: np.ndarray) -> np.ndarray:
+def bi_dipole_far_field(n: np.ndarray, *, pol: str = "z-linear") -> np.ndarray:
     """Far-field electric phasor of the bi-dipole wave.
 
     Parameters
@@ -44,6 +53,9 @@ def bi_dipole_far_field(n: np.ndarray) -> np.ndarray:
     n : np.ndarray, shape (..., 3)
         Unit vector(s) pointing *from the focus toward the source*; the incoming
         radiation arrives from the ``n_y < 0`` hemisphere. Components ``(nx, ny, nz)``.
+    pol : str
+        Polarization mode: ``"z-linear"`` (default) or ``"circular"``
+        (``E_z + i E_x`` superposition).
 
     Returns
     -------
@@ -51,14 +63,17 @@ def bi_dipole_far_field(n: np.ndarray) -> np.ndarray:
         Complex phasor ``(Ex, Ey, Ez)`` (dimensionless shape; the absolute amplitude
         is fixed later by power normalization).
     """
+    _validate_pol(pol)
     nx = n[..., 0]
     ny = n[..., 1]
     nz = n[..., 2]
     # E^e = (z_hat x n) x n  (electric-dipole wave);  E^b = x_hat x n (magnetic-dipole wave).
-    ex = nx * nz
-    ey = nz * (ny - 1.0)
-    ez = ny - nx * nx - ny * ny  # == ny - 1 + nz^2
-    return np.stack([ex, ey, ez], axis=-1)
+    e_z = np.stack([nx * nz, nz * (ny - 1.0), ny - nx * nx - ny * ny], axis=-1)
+    if pol == "z-linear":
+        return e_z
+    # 90-deg rotated mode: z_hat -> x_hat, x_hat -> -z_hat.
+    e_x = np.stack([ny - ny * ny - nz * nz, nx * (ny - 1.0), nx * nz], axis=-1)
+    return e_z + 1j * e_x
 
 
 def f_number_to_theta_max(f_number: float) -> float:
@@ -115,7 +130,10 @@ def align_global_phase(
         )
     e_norm = np.sqrt(np.sum(np.abs(Ec) ** 2, axis=0))
     iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_norm)), e_norm.shape))
-    comp = int(np.argmax(np.abs(Ec[:, iz, iy, ix])))
+    mags = np.abs(Ec[:, iz, iy, ix])
+    max_mag = float(np.max(mags))
+    # Prefer z-component on ties (e.g. circular polarization where |Ex| == |Ez| at focus).
+    comp = 2 if mags[2] >= (1.0 - 1.0e-12) * max_mag else int(np.argmax(mags))
     ref = Ec[comp, iz, iy, ix]
     if abs(ref) == 0.0:
         return Ec, Bc
@@ -136,6 +154,7 @@ def focal_field_angular_spectrum(
     ntheta: int = 40,
     nphi: int = 80,
     far_field=None,
+    pol: str = "z-linear",
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Compute the monochromatic focal phasors ``Ec`` and ``Bc`` of a focused beam.
 
@@ -171,8 +190,9 @@ def focal_field_angular_spectrum(
     grid : dict
         ``{"x0_m", "dx_m", "Nx", ...}`` describing the Cartesian grid.
     """
+    _validate_pol(pol)
     if far_field is None:
-        far_field = bi_dipole_far_field
+        far_field = lambda n: bi_dipole_far_field(n, pol=pol)
 
     if any(int(v) < 2 for v in (nx, ny, nz)):
         raise ValueError("grid sizes must be >= 2")
@@ -255,6 +275,7 @@ def focal_field_slice(
     ntheta: int = 64,
     nphi: int = 128,
     far_field=None,
+    pol: str = "z-linear",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Compute the electric phasor ``Ec`` on a 2-D slice through the focus.
 
@@ -282,8 +303,9 @@ def focal_field_slice(
     info : dict
         ``{"plane", "coord_m", "grid"}`` (grid maps axis names to ``(start, step, n)``).
     """
+    _validate_pol(pol)
     if far_field is None:
-        far_field = bi_dipole_far_field
+        far_field = lambda n: bi_dipole_far_field(n, pol=pol)
 
     k = 2.0 * np.pi / lambda0_m
     theta_max = f_number_to_theta_max(f_number)
@@ -398,24 +420,29 @@ def compute_checks(
     power_w: float,
     grid: dict,
     Bc: np.ndarray | None = None,
+    pol: str = "z-linear",
+    t_ref_s: float = 0.0,
 ) -> dict:
     """Derive the self-validation metadata from a computed field pack.
 
     Returns a ``checks`` dict with ``a_max``, ``a_max_expected``,
     ``chi_max_per_GeV``, ``power_conservation_rel_err`` and ``max_location_m``.
     """
+    _validate_pol(pol)
     omega = C.omega_from_lambda(lambda0_m)
     E_rel = C.relativistic_field_scale(omega)
 
     E = Ec[0]  # strip Nf axis -> (3, nz, ny, nx)
     B = None if Bc is None else Bc[0]
 
-    e_mag = np.sqrt(np.sum(np.abs(E) ** 2, axis=0))
+    # Evaluate the real instantaneous vector field at t_ref_s (matches src.particles).
+    e_ref = np.real(E * np.exp(1.0j * omega * t_ref_s))
+    e_mag = np.sqrt(np.sum(e_ref ** 2, axis=0))
     iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_mag)), e_mag.shape))
     a_max = float(e_mag[iz, iy, ix] / E_rel)
 
     # chi ~ 2 gamma |E_perp| / E_cr  (head-on collision, electron along +y).
-    e_perp = np.sqrt(np.abs(E[0]) ** 2 + np.abs(E[2]) ** 2)
+    e_perp = np.sqrt(e_ref[0] ** 2 + e_ref[2] ** 2)
     chi_max_per_gev = 2.0 * C.GAMMA_PER_GEV * float(np.max(e_perp)) / C.E_CRIT
 
     # Peak location in meters (centered-axis convention).
@@ -437,7 +464,8 @@ def compute_checks(
         p_err = 0.0
 
     # a0 is lambda-independent for a fixed f-number: a0 = eE/(mc omega) ~ sqrt(P).
-    a_max_expected = float(C.A_BIDIPOLE_1PW_1UM * np.sqrt(power_w / 1.0e15))
+    pol_scale = 1.0 / np.sqrt(2.0) if pol == "circular" else 1.0
+    a_max_expected = float(C.A_BIDIPOLE_1PW_1UM * pol_scale * np.sqrt(power_w / 1.0e15))
 
     return {
         "a_max": a_max,
@@ -458,8 +486,9 @@ def mirror_reflection_far_field(
     *,
     f_number: float,
     incident_amplitude: Callable[[np.ndarray], np.ndarray],
+    pol: str = "z-linear",
 ) -> np.ndarray:
-    """Reflect a z-linear-polarized collimated beam off the parabola -> far field.
+    """Reflect a polarized collimated beam off the parabola -> far field.
 
     Maps the mirror radius ``R = 2 L tan(theta/2)`` to the ray direction ``n``, applies
     the local-normal polarization reflection ``E^p = E - 2 (E . N) N`` and the
@@ -475,12 +504,16 @@ def mirror_reflection_far_field(
         Mirror f-number ``L/(2 R_max)`` (defines the aperture ``theta_max``).
     incident_amplitude : callable
         ``incident_amplitude(r) -> amplitude`` at normalized radius ``r = R/R_max``.
+    pol : str
+        Incident polarization: ``"z-linear"`` (default) or ``"circular"``
+        (``z_hat + i x_hat`` superposition).
 
     Returns
     -------
     np.ndarray, shape (..., 3)
         Far-field electric phasor ``(Ex, Ey, Ez)`` (dimensionless shape).
     """
+    _validate_pol(pol)
     ny = n[..., 1]
     cos_theta = np.clip(-ny, -1.0, 1.0)  # n_y = -cos(theta)
     denom = 1.0 + cos_theta
@@ -490,14 +523,20 @@ def mirror_reflection_far_field(
     theta_max = f_number_to_theta_max(f_number)
     r_over_rmax = np.tan(theta / 2.0) / np.tan(theta_max / 2.0)
 
-    E_in = np.zeros_like(n)
-    E_in[..., 2] = incident_amplitude(r_over_rmax)  # z-linear polarization
+    amp = np.asarray(incident_amplitude(r_over_rmax))
+    if pol == "z-linear":
+        E_in = np.zeros(n.shape, dtype=np.result_type(n.dtype, amp.dtype))
+        E_in[..., 2] = amp
+    else:
+        E_in = np.zeros(n.shape, dtype=np.complex128)
+        E_in[..., 2] = amp
+        E_in[..., 0] = 1j * amp
     E_refl = reflect(E_in, mirror_normal(n))
     apod = 2.0 / denom
     return E_refl * apod[..., None]
 
 
-def ideal_far_field(n: np.ndarray, *, f_number: float) -> np.ndarray:
+def ideal_far_field(n: np.ndarray, *, f_number: float, pol: str = "z-linear") -> np.ndarray:
     """Ideal Sheppard-Larkin far field, obtained by reflecting I^p(R) (eq. 13).
 
     This reproduces :func:`bi_dipole_far_field` (eqs. 9-10) up to a constant factor,
@@ -509,6 +548,7 @@ def ideal_far_field(n: np.ndarray, *, f_number: float) -> np.ndarray:
         n,
         f_number=f_number,
         incident_amplitude=lambda r: ideal_incident_amplitude(r, f_number=f_number),
+        pol=pol,
     )
 
 
@@ -518,6 +558,7 @@ def gaussian_far_field(
     f_number: float,
     w0_over_rmax: float = 0.7,
     apod_order: float = 8.0,
+    pol: str = "z-linear",
 ) -> np.ndarray:
     """Realistic far field: a Gaussian beam shaped by an apodizer, reflected off the
     parabolic mirror.  This is the full optical pipeline (input beam + optical system).
@@ -530,4 +571,5 @@ def gaussian_far_field(
         incident_amplitude=lambda r: gaussian_incident_amplitude(
             r, w0_over_rmax=w0_over_rmax, apod_order=apod_order
         ),
+        pol=pol,
     )
