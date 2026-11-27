@@ -26,6 +26,8 @@ Global conventions (see README):
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from . import constants as C
@@ -412,10 +414,9 @@ def compute_checks(
     E = Ec[0]  # strip Nf axis -> (3, nz, ny, nx)
     B = None if Bc is None else Bc[0]
 
-    emag = np.abs(E)
-    idx = np.unravel_index(int(np.argmax(emag)), emag.shape)
-    comp, iz, iy, ix = (int(v) for v in idx)
-    a_max = float(emag[comp, iz, iy, ix] / E_rel)
+    e_mag = np.sqrt(np.sum(np.abs(E) ** 2, axis=0))
+    iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_mag)), e_mag.shape))
+    a_max = float(e_mag[iz, iy, ix] / E_rel)
 
     # chi ~ 2 gamma |E_perp| / E_cr  (head-on collision, electron along +y).
     e_perp = np.sqrt(np.abs(E[0]) ** 2 + np.abs(E[2]) ** 2)
@@ -434,7 +435,8 @@ def compute_checks(
     # outside the window), not a field error (the direct Debye B is exact).
     if B is not None:
         p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=E.shape[2] // 2)
-        p_err = float(abs(abs(p0) - power_w) / power_w)
+        # Laser propagates along -y, so Poynting flux p0 must be negative.
+        p_err = float(abs((-p0) - power_w) / power_w)
     else:
         p_err = 0.0
 
@@ -455,7 +457,12 @@ def compute_checks(
 # --------------------------------------------------------------------------- #
 # Realistic optical pipeline: Gaussian beam + apodizer + mirror reflection.
 # --------------------------------------------------------------------------- #
-def mirror_reflection_far_field(n, *, f_number, incident_amplitude):
+def mirror_reflection_far_field(
+    n: np.ndarray,
+    *,
+    f_number: float,
+    incident_amplitude: Callable[[np.ndarray], np.ndarray],
+) -> np.ndarray:
     """Reflect a z-linear-polarized collimated beam off the parabola -> far field.
 
     Maps the mirror radius ``R = 2 L tan(theta/2)`` to the ray direction ``n``, applies
@@ -466,7 +473,8 @@ def mirror_reflection_far_field(n, *, f_number, incident_amplitude):
     Parameters
     ----------
     n : np.ndarray, shape (..., 3)
-        Unit direction from the focus toward the mirror (``n_y < 0`` hemisphere).
+        Unit direction from the focus toward the mirror (``n_y < 0`` hemisphere;
+        ``n_y > 0`` supported for ``f_number < 0.25`` up to ``theta < pi``).
     f_number : float
         Mirror f-number ``L/(2 R_max)`` (defines the aperture ``theta_max``).
     incident_amplitude : callable
@@ -478,7 +486,10 @@ def mirror_reflection_far_field(n, *, f_number, incident_amplitude):
         Far-field electric phasor ``(Ex, Ey, Ez)`` (dimensionless shape).
     """
     ny = n[..., 1]
-    cos_theta = np.clip(-ny, 0.0, 1.0)  # n_y = -cos(theta)
+    cos_theta = np.clip(-ny, -1.0, 1.0)  # n_y = -cos(theta)
+    denom = 1.0 + cos_theta
+    if np.any(denom <= 0.0):
+        raise ValueError("Ray at theta=pi (n_y=+1) is singular for parabolic mirror")
     theta = np.arccos(cos_theta)
     theta_max = f_number_to_theta_max(f_number)
     r_over_rmax = np.tan(theta / 2.0) / np.tan(theta_max / 2.0)
@@ -486,11 +497,11 @@ def mirror_reflection_far_field(n, *, f_number, incident_amplitude):
     E_in = np.zeros_like(n)
     E_in[..., 2] = incident_amplitude(r_over_rmax)  # z-linear polarization
     E_refl = reflect(E_in, mirror_normal(n))
-    apod = 2.0 / (1.0 + cos_theta)
+    apod = 2.0 / denom
     return E_refl * apod[..., None]
 
 
-def ideal_far_field(n, *, f_number):
+def ideal_far_field(n: np.ndarray, *, f_number: float) -> np.ndarray:
     """Ideal Sheppard-Larkin far field, obtained by reflecting I^p(R) (eq. 13).
 
     This reproduces :func:`bi_dipole_far_field` (eqs. 9-10) up to a constant factor,
@@ -505,7 +516,13 @@ def ideal_far_field(n, *, f_number):
     )
 
 
-def gaussian_far_field(n, *, f_number, w0_over_rmax=0.7, apod_order=8.0):
+def gaussian_far_field(
+    n: np.ndarray,
+    *,
+    f_number: float,
+    w0_over_rmax: float = 0.7,
+    apod_order: float = 8.0,
+) -> np.ndarray:
     """Realistic far field: a Gaussian beam shaped by an apodizer, reflected off the
     parabolic mirror.  This is the full optical pipeline (input beam + optical system).
     """

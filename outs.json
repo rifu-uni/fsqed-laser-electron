@@ -1,15 +1,15 @@
 {
   "schema_version": "1.0",
   "grid": {
-    "x0_m": -1.6e-06,
+    "x0_m": -3.2e-06,
     "dx_m": 1e-07,
-    "Nx": 32,
-    "y0_m": -1.6e-06,
-    "dy_m": 1e-07,
-    "Ny": 32,
-    "z0_m": -1.6e-06,
+    "Nx": 64,
+    "y0_m": -2e-06,
+    "dy_m": 6.25e-08,
+    "Ny": 64,
+    "z0_m": -3.2e-06,
     "dz_m": 1e-07,
-    "Nz": 32
+    "Nz": 64
   },
   "freqs": [
     2354564459136066.5
@@ -26,10 +26,10 @@
     "t_ref_s": 0.0
   },
   "checks": {
-    "a_max": 509.7673673067425,
+    "a_max": 509.6701108015546,
     "a_max_expected": 551.543289325507,
-    "chi_max_per_GeV": 6.051156180919325,
-    "power_conservation_rel_err": 0.0,
+    "chi_max_per_GeV": 6.050001704700865,
+    "power_conservation_rel_err": 0.015003581811294625,
     "max_location_m": [
       0.0,
       0.0,
@@ -43,7 +43,7 @@
   "apod_order": 8.0,
   "degradation": {
     "mse": 0.7271367701659123,
-    "correlation": 0.9999100023166931,
+    "correlation": 0.9999100023166925,
     "transmission": 0.981960787976708,
     "f_number": 0.25
   }

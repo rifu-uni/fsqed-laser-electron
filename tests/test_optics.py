@@ -143,6 +143,25 @@ def test_ideal_reflection_matches_analytic():
     assert overlap > 0.999
 
 
+def test_ideal_reflection_handles_f_below_quarter():
+    th = np.linspace(0.05, 2.2, 40)
+    ph = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+    TH, PH = np.meshgrid(th, ph, indexing="ij")
+    n = np.stack([np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1)
+    a = focus.bi_dipole_far_field(n).reshape(-1, 3)
+    b = focus.ideal_far_field(n, f_number=0.1).reshape(-1, 3)
+    a = a / np.sqrt(np.sum(np.abs(a) ** 2))
+    b = b / np.sqrt(np.sum(np.abs(b) ** 2))
+    overlap = abs(np.vdot(a.ravel(), b.ravel()))
+    assert overlap > 0.999
+
+
+def test_compute_checks_catches_flipped_bc():
+    Ec, Bc, grid, _ = _compute_small()
+    checks = focus.compute_checks(Ec, lambda0_m=LAM, power_w=POWER, grid=grid, Bc=-Bc)
+    assert checks["power_conservation_rel_err"] > 1.5
+
+
 def test_gaussian_far_field_runs():
     n = _sample_n()
     E = focus.gaussian_far_field(n, f_number=F_NUMBER, w0_over_rmax=0.7, apod_order=8.0)
