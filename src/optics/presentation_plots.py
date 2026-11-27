@@ -94,13 +94,15 @@ def _add_opening_angle_top_axis(ax: plt.Axes) -> plt.Axes:
 def _add_field_right_axis(
     ax: plt.Axes,
     *,
-    energy_gev: float,
     scale_exponent: float,
     ylabel: str,
 ) -> plt.Axes:
-    """Attach a right y-axis converting chi_max (at 1 GeV) to peak |E|."""
-    gamma = C.energy_gev_to_gamma(energy_gev)
-    chi_to_e = C.E_CRIT / (2.0 * gamma) / (10.0 ** scale_exponent)
+    """Attach a right y-axis converting chi_max per GeV (left axis) to peak |E|.
+
+    The left axis is chi_max / GeV, so the chi -> E conversion uses GAMMA_PER_GEV
+    and is independent of the electron energy.
+    """
+    chi_to_e = C.E_CRIT / (2.0 * C.GAMMA_PER_GEV) / (10.0 ** scale_exponent)
     ax_right = ax.twinx()
     y0, y1 = ax.get_ylim()
     ax_right.set_ylim(y0 * chi_to_e, y1 * chi_to_e)
@@ -249,8 +251,8 @@ def image_kappa_sweep(out: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(8.2, 5.4), constrained_layout=True)
     ax.plot(f, chi_id, "o-", color="C0", ms=4, lw=2.0, label="Ideal (Sheppard-Larkin)")
-    ax.plot(f, chi_gf, "--", color="C1", lw=1.8, label="Gaussiano realista (potencia en foco)")
-    ax.plot(f, chi_gl, "s-", color="C3", ms=3.8, lw=2.0, label=f"Gaussiano realista (con pérdida $T={t_total:.3f}$)")
+    ax.plot(f, chi_gf, "--", color="C1", lw=1.8, label=f"Gaussiano realista (potencia en foco; $w_0/R_{{\\max}}={W0_OVER_RMAX}$ fijo)")
+    ax.plot(f, chi_gl, "s-", color="C3", ms=3.8, lw=2.0, label=f"Gaussiano realista (con pérdida $T={t_total:.3f}$; $w_0/R_{{\\max}}={W0_OVER_RMAX}$ fijo)")
     ax.axhline(C.KAPPA_BIDIPOLE_MAX, color="0.35", ls=":", lw=1.4, label=r"Límite bi-dipolo $\kappa_{\max} = 5.25$")
 
     ax.set_xlim(0.0, 2.0)
@@ -262,7 +264,6 @@ def image_kappa_sweep(out: Path) -> None:
     _add_opening_angle_top_axis(ax)
     _add_field_right_axis(
         ax,
-        energy_gev=C.PAPER_FIG4_LASER["energy_gev"],
         scale_exponent=14,
         ylabel=r"field strength ($10^{14}\ \mathrm{V/m}$)",
     )
@@ -380,8 +381,8 @@ def image_unal_vs_paper_comparison(out: Path) -> None:
         y_gl = np.array([r["chi_max_per_GeV"] for r in r_gl]) * yscale
 
         ax.plot(f, y_id, "o-", color="C0", ms=3.5, lw=2.0, label="Ideal (Sheppard-Larkin)")
-        ax.plot(f, y_gf, "--", color="C1", lw=1.8, label="Gaussiano (en foco)")
-        ax.plot(f, y_gl, "s-", color="C3", ms=3.5, lw=2.0, label="Gaussiano (con pérdida $T$)")
+        ax.plot(f, y_gf, "--", color="C1", lw=1.8, label=f"Gaussiano (en foco; $w_0/R_{{\\max}}={W0_OVER_RMAX}$ fijo)")
+        ax.plot(f, y_gl, "s-", color="C3", ms=3.5, lw=2.0, label=f"Gaussiano (con pérdida $T$; $w_0/R_{{\\max}}={W0_OVER_RMAX}$ fijo)")
         ax.set_xlim(0.0, 2.0)
         ax.set_ylim(0.0, float(y_id.max()) * 1.12)
         ax.set_xlabel("f-number  $L / (2 R_{\\max})$", fontsize=10.5)

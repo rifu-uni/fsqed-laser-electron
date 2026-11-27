@@ -6,11 +6,13 @@ Run with ``pytest -q`` (the project's test task) or directly with
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -21,6 +23,7 @@ from src.optics import comparison  # noqa: E402
 from src.optics import constants as C  # noqa: E402
 from src.optics import focus  # noqa: E402
 from src.optics import metadata as meta_mod  # noqa: E402
+from src.optics import presentation_plots  # noqa: E402
 from src.optics import sweep  # noqa: E402
 
 LAM = 0.8e-6
@@ -96,8 +99,18 @@ def test_global_phase_aligned_at_focus():
 
 
 def test_a_max_close_to_expected():
-    _, _, _, checks = _compute_small()
+    Ec, Bc, grid, checks = _compute_small()
     assert 0.85 * checks["a_max_expected"] < checks["a_max"] < 1.15 * checks["a_max_expected"]
+
+    # With the f-number-aware truncated-aperture factor (f=0.25 -> zeta=pi/2, factor
+    # sqrt(7/8) matching src.particles.fields._truncated_bidipole_kappa) the theory
+    # reference tightens onto the measured value.
+    scaled = focus.compute_checks(
+        Ec, lambda0_m=LAM, power_w=POWER, grid=grid, Bc=Bc, f_number=F_NUMBER
+    )
+    assert scaled["a_max"] == checks["a_max"]
+    assert np.isclose(scaled["a_max_expected"], checks["a_max_expected"] * math.sqrt(7.0 / 8.0), rtol=1e-12)
+    assert abs(scaled["a_max"] / scaled["a_max_expected"] - 1.0) < 0.08
 
 
 def test_chi_max_matches_a_max_scaling():
@@ -195,6 +208,14 @@ def test_invalid_pol_rejected():
     params = cli.default_parameters()
     params["pol"] = "elliptical"
     with pytest.raises(ValueError, match="pol must be"):
+        cli.generate_field_pack(params)
+
+
+def test_invalid_mode_rejected():
+    params = {**cli.default_parameters(), "mode": "spherical"}
+    with pytest.raises(ValueError, match="mode must be"):
+        cli.build_far_field(params)
+    with pytest.raises(ValueError, match="mode must be"):
         cli.generate_field_pack(params)
 
 
@@ -352,6 +373,21 @@ def test_cli_account_for_losses_scales_focal_power_and_kappa():
     )
 
 
+def test_n_cycles_overrides_tau_fwhm():
+    params = {
+        **cli.default_parameters(),
+        "nx": 16, "ny": 16, "nz": 16,
+        "ntheta": 16, "nphi": 32,
+        "tau_fwhm_s": 30.0e-15,
+        "n_cycles": 5.0,
+    }
+    pack = cli.generate_field_pack(params)
+    expected_tau = C.tau_fwhm_from_cycles(5.0, params["lambda0_m"])
+    assert pack["metadata"]["pulse"]["tau_fwhm_s"] == pytest.approx(expected_tau, rel=1e-12)
+    assert pack["metadata"]["pulse"]["tau_fwhm_s"] < 0.5 * 30.0e-15
+    assert pack["metadata"]["n_cycles"] == pytest.approx(5.0)
+
+
 def test_area_weighted_mse_rmse_and_correlation():
     R = np.linspace(0.0, 1.0, 2001)
     ones = np.ones_like(R)
@@ -386,6 +422,29 @@ def test_area_weighted_mse_rmse_and_correlation():
 
     with pytest.raises(ValueError, match="R must be"):
         comparison.compare_profiles(ones, ones, -R)
+
+
+def test_compare_profiles_rejects_zero_intensity():
+    R = np.linspace(0.0, 1.0, 2001)
+    zeros = np.zeros_like(R)
+    with pytest.raises(ValueError, match="non-positive total radial power"):
+        comparison.compare_profiles(zeros, zeros, R)
+    with pytest.raises(ValueError, match="non-positive total radial power"):
+        comparison.compare_profiles(np.ones_like(R), zeros, R)
+
+
+def test_relative_rmse_present_and_consistent():
+    R = np.linspace(0.0, 1.0, 2001)
+    # After unit-radial-power normalization on R in [0, 1] the area-weighted mean of
+    # the ideal profile is exactly 2, so relative_rmse = rmse / mean_ideal = rmse / 2.
+    res = comparison.compare_profiles(np.ones_like(R), R ** 2, R)
+    assert np.isclose(res["relative_rmse"], res["rmse"] / 2.0, rtol=1e-10)
+    ident = comparison.compare_profiles(np.ones_like(R), np.ones_like(R), R)
+    assert ident["relative_rmse"] == pytest.approx(0.0, abs=1e-15)
+
+    rep = comparison.summarize_degradation(f_number=F_NUMBER)
+    assert "relative_rmse" in rep
+    assert np.isclose(rep["relative_rmse"], rep["rmse"] / 2.0, rtol=1e-10)
 
 
 def test_default_fig4_sweep_range_and_presets():
@@ -452,6 +511,18 @@ def test_expected_net_y_flux_and_deep_mirror_power_check():
         }
         pack = cli.generate_field_pack(params)
         assert pack["metadata"]["checks"]["power_conservation_rel_err"] < 0.10
+
+
+def test_presentation_plots_smoke(tmp_path):
+    """Fast smoke test: incident-profile and far-field figures write valid PNGs."""
+    incident_png = tmp_path / "06_perfil_incidente_eq13.png"
+    presentation_plots.image_incident_profile(incident_png)
+    farfield_png = tmp_path / "05_patron_angular.png"
+    presentation_plots.image_farfield(farfield_png)
+    for png in (incident_png, farfield_png):
+        assert png.exists() and png.stat().st_size > 0
+        with Image.open(png) as img:
+            img.verify()
 
 
 def _run_all():

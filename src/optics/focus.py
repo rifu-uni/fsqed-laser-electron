@@ -12,8 +12,10 @@ Secs. III-IV:
   ``Ec(x, y, z)`` is a superposition of plane waves with the exact propagator
   ``ky = sqrt(k^2 - kx^2 - kz^2)`` (never the paraxial ``k - (kx^2+kz^2)/2k``).
 
-The magnetic phasor ``Bc`` is reconstructed from ``Ec`` via ``B = (i/omega) curl E``
-using central finite differences, matching the convention used by ``src.particles``.
+The magnetic phasor ``Bc`` is computed directly inside the exact Debye quadrature as
+``B_far = (1/c) n x E_far`` (algebraically identical to ``B = (i/omega) curl E`` used
+by ``src.particles``); ``magnetic_field_from_curl`` is kept as a finite-difference
+cross-check.
 
 Global conventions (see README):
 
@@ -26,6 +28,7 @@ Global conventions (see README):
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -51,8 +54,10 @@ def bi_dipole_far_field(n: np.ndarray, *, pol: str = "z-linear") -> np.ndarray:
     Parameters
     ----------
     n : np.ndarray, shape (..., 3)
-        Unit vector(s) pointing *from the focus toward the source*; the incoming
-        radiation arrives from the ``n_y < 0`` hemisphere. Components ``(nx, ny, nz)``.
+        Unit ray-propagation vector(s): under the ``exp(+i omega t)`` convention the
+        plane-wave kernel ``exp(-i k n . r)`` propagates along ``+n``. The radiation
+        arrives from the mirror at ``-n`` (origin inversion), so ``n_y < 0`` for
+        ``theta < pi/2``. Components ``(nx, ny, nz)``.
     pol : str
         Polarization mode: ``"z-linear"`` (default) or ``"circular"``
         (``E_z + i E_x`` superposition).
@@ -229,7 +234,10 @@ def focal_field_angular_spectrum(
     span_y_m : float, optional
         Longitudinal ``y`` span (m).  Default ``8 * lambda0_m``.
     far_field : callable, optional
-        ``far_field(n) -> E(..., 3)``.  Defaults to :func:`bi_dipole_far_field`.
+        ``far_field(n) -> E(..., 3)`` where ``n`` is the ray-propagation unit vector
+        (the plane-wave kernel ``exp(-i k n . r)`` propagates along ``+n``; the mirror
+        point sits at ``-n`` from the focus, origin inversion).  Defaults to
+        :func:`bi_dipole_far_field`.
 
     Returns
     -------
@@ -265,9 +273,11 @@ def focal_field_angular_spectrum(
     Y = y0 + np.arange(ny) * dy
     Z = z0 + np.arange(nz) * dz
 
-    # Ray grid: theta measured from the -y axis (the mirror axis), phi azimuth.  This
-    # (theta, phi) parameterization makes the Debye integral a plain, singularity-free
-    # sum of plane waves (no 1/ky Jacobian pole at the NA=1 rim).
+    # Ray grid: theta measured from the -y axis (the mirror axis), phi azimuth.  Each
+    # grid direction n is the propagation unit vector of its plane wave (the mirror
+    # point sits at -n, origin inversion).  This (theta, phi) parameterization makes
+    # the Debye integral a plain, singularity-free sum of plane waves (no 1/ky
+    # Jacobian pole at the NA=1 rim).
     th, ph, n, w = _angular_quadrature_grid(theta_max, ntheta, nphi)
     far = far_field(n)  # (ntheta, nphi, 3)
 
@@ -460,11 +470,16 @@ def compute_checks(
     pol: str = "z-linear",
     t_ref_s: float = 0.0,
     expected_y_flux_w: float | None = None,
+    f_number: float | None = None,
 ) -> dict:
     """Derive the self-validation metadata from a computed field pack.
 
     Returns a ``checks`` dict with ``a_max``, ``a_max_expected``,
     ``chi_max_per_GeV``, ``power_conservation_rel_err`` and ``max_location_m``.
+    When ``f_number`` is provided, ``a_max_expected`` is additionally scaled by the
+    truncated bi-dipole aperture factor
+    ``sqrt((8 - (1 + cos zeta)^3) / 8)`` with ``zeta = f_number_to_theta_max(f_number)``
+    (matching ``src.particles.fields._truncated_bidipole_kappa``).
     """
     _validate_pol(pol)
     if not np.isfinite(power_w) or power_w <= 0.0:
@@ -507,7 +522,13 @@ def compute_checks(
 
     # a0 is lambda-independent for a fixed f-number: a0 = eE/(mc omega) ~ sqrt(P).
     pol_scale = 1.0 / np.sqrt(2.0) if pol == "circular" else 1.0
-    a_max_expected = float(C.A_BIDIPOLE_1PW_1UM * pol_scale * np.sqrt(power_w / 1.0e15))
+    aperture_factor = 1.0
+    if f_number is not None:
+        zeta = f_number_to_theta_max(f_number)
+        aperture_factor = math.sqrt(max(0.0, (8.0 - (1.0 + math.cos(zeta)) ** 3) / 8.0))
+    a_max_expected = float(
+        C.A_BIDIPOLE_1PW_1UM * pol_scale * np.sqrt(power_w / 1.0e15) * aperture_factor
+    )
 
     return {
         "a_max": a_max,
@@ -540,8 +561,11 @@ def mirror_reflection_far_field(
     Parameters
     ----------
     n : np.ndarray, shape (..., 3)
-        Unit direction from the focus toward the mirror (``n_y < 0`` hemisphere;
-        ``n_y > 0`` supported for ``f_number < 0.25`` up to ``theta < pi``).
+        Unit ray-propagation vector of the reflected ray: the plane-wave kernel
+        ``exp(-i k n . r)`` under ``exp(+i omega t)`` propagates along ``+n``. The
+        reflecting mirror point sits at ``-n`` from the focus (origin inversion), so
+        ``n_y < 0`` for ``theta < pi/2``; backward rays with ``n_y > 0`` are supported
+        for ``f_number < 0.25`` up to ``theta < pi``.
     f_number : float
         Mirror f-number ``L/(2 R_max)`` (defines the aperture ``theta_max``).
     incident_amplitude : callable

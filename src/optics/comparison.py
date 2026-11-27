@@ -47,14 +47,19 @@ def incident_intensity_profiles(*, f_number, w0_over_rmax=0.7, apod_order=8.0, n
 
 def _normalize_power(I, R):
     tot = np.trapezoid(I * R, R)
-    return I / tot if tot > 0.0 else I
+    if tot <= 0.0:
+        raise ValueError("Intensity profile has non-positive total radial power")
+    return I / tot
 
 
 def compare_profiles(I_ideal, I_real, R):
-    """Return area-weighted ``{"mse", "rmse", "correlation"}`` for two intensity profiles.
+    """Return area-weighted ``{"mse", "rmse", "relative_rmse", "correlation"}`` for two
+    intensity profiles.
 
     Both profiles are normalized to unit total radial power (``int I(R) R dR = 1``)
     first, and all moments are weighted by ``R dR`` over the circular mirror aperture.
+    ``relative_rmse`` is ``rmse / mean(I_ideal)`` after that normalization (``0.0``
+    when the normalized ideal profile has zero mean).
     """
     r_arr, area_norm = _validate_radial_grid(R)
     i_ideal_arr = np.asarray(I_ideal, dtype=np.float64)
@@ -80,7 +85,8 @@ def compare_profiles(I_ideal, I_real, R):
         corr = float(np.clip(_area_mean(di * dr, r_arr, area_norm) / np.sqrt(vi * vr), -1.0, 1.0))
     else:
         corr = 0.0
-    return {"mse": mse, "rmse": rmse, "correlation": corr}
+    relative_rmse = float(rmse / mi) if mi > 0.0 else 0.0
+    return {"mse": mse, "rmse": rmse, "relative_rmse": relative_rmse, "correlation": corr}
 
 
 def aperture_transmission(w0_over_rmax: float) -> float:
@@ -115,7 +121,12 @@ def total_transmission(w0_over_rmax: float, apod_order: float, nr: int = 512) ->
 
 
 def summarize_degradation(*, f_number, w0_over_rmax=0.7, apod_order=8.0, nr=512):
-    """Full quantitative degradation report of the realistic vs ideal profile."""
+    """Full quantitative degradation report of the realistic vs ideal profile.
+
+    ``transmission`` is the apodizer-only transmission (in-aperture), while
+    ``total_transmission`` also includes the finite-aperture truncation of the
+    collimated Gaussian beam.
+    """
     R, I_ideal, I_real = incident_intensity_profiles(
         f_number=f_number, w0_over_rmax=w0_over_rmax, apod_order=apod_order, nr=nr
     )

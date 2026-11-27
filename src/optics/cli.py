@@ -48,7 +48,7 @@ def default_parameters() -> dict:
         "ntheta": 32,
         "nphi": 64,
         "focal_length_m": None,
-        "account_for_losses": False,
+        "account_for_losses": True,   # scale focal power by aperture*apodizer transmission
     }
 
 
@@ -67,9 +67,12 @@ def preset_parameters(preset: str = "paper") -> dict:
 
 def build_far_field(params: dict):
     """Return the ``far_field(n)`` callable for the chosen execution mode."""
+    mode = params["mode"]
+    if mode not in ("ideal", "gaussian"):
+        raise ValueError(f"mode must be 'ideal' or 'gaussian', got {mode!r}")
     fn = params["f_number"]
     pol = focus._validate_pol(params["pol"])
-    if params["mode"] == "ideal":
+    if mode == "ideal":
         return lambda n: focus.bi_dipole_far_field(n, pol=pol)
     return lambda n: focus.gaussian_far_field(
         n, f_number=fn,
@@ -81,6 +84,9 @@ def build_far_field(params: dict):
 
 def generate_field_pack(params: dict) -> dict:
     """Compute the focal field pack and return the (validated) metadata dict."""
+    mode = params["mode"]
+    if mode not in ("ideal", "gaussian"):
+        raise ValueError(f"mode must be 'ideal' or 'gaussian', got {mode!r}")
     pol = focus._validate_pol(params["pol"])
 
     lambda0_m = params["lambda0_m"]
@@ -88,13 +94,13 @@ def generate_field_pack(params: dict) -> dict:
     source_power_w = float(params["power_w"])
     n_cycles = params.get("n_cycles")
     tau_fwhm_s = params.get("tau_fwhm_s")
-    if tau_fwhm_s is None and n_cycles is not None:
+    if n_cycles is not None:
         tau_fwhm_s = C.tau_fwhm_from_cycles(n_cycles, lambda0_m)
 
     account_for_losses = bool(params.get("account_for_losses", False))
     degradation = None
     focal_power_w = source_power_w
-    if params["mode"] == "gaussian":
+    if mode == "gaussian":
         degradation = comparison.summarize_degradation(
             f_number=f_number,
             w0_over_rmax=params["w0_over_rmax"],
@@ -126,9 +132,10 @@ def generate_field_pack(params: dict) -> dict:
         Bc=Bc,
         pol=pol,
         expected_y_flux_w=expected_y_flux_w,
+        f_number=f_number,
     )
-    extra: dict = {"mode": params["mode"]}
-    if params["mode"] == "gaussian":
+    extra: dict = {"mode": mode}
+    if mode == "gaussian":
         assert degradation is not None
         scale_focal = float(np.sqrt(focal_power_w / 1.0e15) * (1.0e-6 / lambda0_m))
         kappa_eff_focal = float(checks["chi_max_per_GeV"] / scale_focal)
@@ -151,12 +158,12 @@ def generate_field_pack(params: dict) -> dict:
     return {"Ec": Ec, "Bc": Bc, "metadata": metadata}
 
 
-def save_field_pack(pack: dict, *, out_dir: Path | None = None) -> Path:
-    """Write the ``.npz`` field pack and return its path."""
+def save_field_pack(pack: dict, *, out_dir: Path | None = None, filename: str | None = None) -> Path:
+    """Write the ``.npz`` field pack and return its path (default name ``f{f_number}.npz``)."""
     out_dir = out_dir or (REPO_ROOT / "data")
     out_dir.mkdir(parents=True, exist_ok=True)
     fn = pack["metadata"]["f_number"]
-    path = out_dir / f"f{fn}.npz"
+    path = out_dir / (filename if filename is not None else f"f{fn}.npz")
     np.savez_compressed(
         path, Ec=pack["Ec"], Bc=pack["Bc"], metadata=json.dumps(pack["metadata"])
     )
@@ -198,8 +205,15 @@ def main(argv=None) -> int:
     parser.add_argument("--focal-length-m", type=float, default=None)
     parser.add_argument(
         "--account-for-losses",
-        action="store_true",
-        help="Scale focal power in gaussian mode by aperture*apodizer total transmission.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Scale focal power in gaussian mode by aperture*apodizer total transmission "
+        "(default: on; disable with --no-account-for-losses).",
+    )
+    parser.add_argument(
+        "--out-npz",
+        default=None,
+        help="Optional .npz filename (written under data/) overriding the default f{f_number}.npz.",
     )
     parser.add_argument("--out-json", default=str(REPO_ROOT / "outs.json"))
     args = parser.parse_args(argv)
@@ -235,7 +249,7 @@ def main(argv=None) -> int:
     }
 
     pack = generate_field_pack(params)
-    npz_path = save_field_pack(pack)
+    npz_path = save_field_pack(pack, filename=args.out_npz)
 
     meta_json = json.dumps(pack["metadata"], indent=2)
     Path(args.out_json).write_text(meta_json + "\n", encoding="utf-8")

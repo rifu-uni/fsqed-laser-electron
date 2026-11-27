@@ -14,7 +14,7 @@
   "freqs": [
     2354564459136066.5
   ],
-  "power_W": 1000000000000000.0,
+  "power_W": 965385403637006.8,
   "f_number": 0.25,
   "lambda0_m": 8e-07,
   "pol": "z-linear",
@@ -26,10 +26,10 @@
     "t_ref_s": 0.0
   },
   "checks": {
-    "a_max": 509.6701108015545,
-    "a_max_expected": 551.543289325507,
-    "chi_max_per_GeV": 6.050001704700864,
-    "power_conservation_rel_err": 0.015003581811294376,
+    "a_max": 500.7714138452127,
+    "a_max_expected": 506.91366110322986,
+    "chi_max_per_GeV": 5.944370374523752,
+    "power_conservation_rel_err": 0.015003581811294221,
     "max_location_m": [
       0.0,
       0.0,
@@ -44,15 +44,16 @@
   "degradation": {
     "mse": 0.2971812826425743,
     "rmse": 0.5451433597161157,
+    "relative_rmse": 0.27257167985805786,
     "correlation": 0.9997847107608588,
     "transmission": 0.981960787976708,
     "aperture_transmission": 0.9831201158512101,
     "total_transmission": 0.9653854036370068,
     "f_number": 0.25,
-    "kappa_eff_focal": 4.840001363760691,
-    "kappa_eff_effective": 4.7554962996190016,
+    "kappa_eff_focal": 4.84000136376069,
+    "kappa_eff_effective": 4.755496299619001,
     "source_power_W": 1000000000000000.0,
-    "focal_power_W": 1000000000000000.0,
-    "account_for_losses": false
+    "focal_power_W": 965385403637006.8,
+    "account_for_losses": true
   }
 }
