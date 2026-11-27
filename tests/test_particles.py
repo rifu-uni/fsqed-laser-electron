@@ -51,7 +51,12 @@ from src.particles import (
     tau_fwhm_to_sigma_t,
     theoretical_chi_max,
 )
-from src.particles.qed import _interp_table_1d_numba, _lookup_g_rate_numba
+from src.particles.qed import (
+    _interp_table_1d_numba,
+    _lookup_cdf_tail_from_invcdf_numba,
+    _lookup_g_rate_numba,
+    _lookup_inv_cdf_numba,
+)
 
 SAMPLE_FIELD_PATH = REPO_ROOT / "data" / "sample_field.npz"
 
@@ -291,13 +296,32 @@ def test_lcfa_rate_and_inverse_cdf() -> None:
     gamma = energy_gev_to_gamma(10.0)
     chi_low = 1.0e-3
     w_rad = lcfa_rate_per_s(gamma, chi_low, table=table)
-    w_cl = (5.0 * ALPHA_FS * MC2_J / (3.0 * math.sqrt(3.0) * HBAR * gamma)) * chi_low
+    w_cl = (5.0 * ALPHA_FS * MC2_J / (2.0 * math.sqrt(3.0) * HBAR * gamma)) * chi_low
     assert abs(w_rad - w_cl) / w_cl < 0.02
 
     assert np.all(np.diff(table.inv_cdf, axis=1) >= 0.0)
     assert np.all(table.inv_cdf[:, 0] == 0.0)
     assert np.all(table.inv_cdf[:, -1] < 1.0)
     assert np.all((table.high_energy_fraction >= 0.0) & (table.high_energy_fraction <= 1.0))
+
+    # Tail-clustered inv_cdf accurately recovers P(delta > 0.5) down to rare-tail chi=0.05
+    for chi_test in (0.05, 0.1, 0.5, 1.0, 10.0):
+        tail_inv = _lookup_cdf_tail_from_invcdf_numba(
+            chi_test, 0.5, table.log_chi_grid, table.inv_cdf
+        )
+        tail_ref = float(np.interp(chi_test, table.chi_grid, table.high_energy_fraction))
+        assert tail_ref > 0.0
+        assert math.isclose(tail_inv, tail_ref, rel_tol=0.15)
+
+    # Direct Monte Carlo draw from inv_cdf at chi=0.05 respects rare tail probability (~4.3e-8)
+    rng_tail = np.random.default_rng(42)
+    q_samples = rng_tail.uniform(0.0, 1.0, size=100_000)
+    high_count = sum(
+        1
+        for q_val in q_samples
+        if _lookup_inv_cdf_numba(0.05, float(q_val), table.log_chi_grid, table.inv_cdf) > 0.5
+    )
+    assert (high_count / 100_000) < 1.0e-4
 
     # Bounded fraction columns stay clamped <= 1.0 at extreme chi=1e5 while G(chi) extrapolates chi^(2/3)
     for col in (

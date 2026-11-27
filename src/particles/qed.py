@@ -18,9 +18,10 @@ from .pusher import ElectronBatch, build_simulation_time_grid, step_boris_numba,
 
 # W0 = alpha_fs * m_e * c^2 / (sqrt(3) * pi * hbar)
 W0_LCFA_PER_S: float = (ALPHA_FS * MC2_J) / (math.sqrt(3.0) * math.pi * HBAR)
-_ASymptote_G_COEFF: float = 5.0 * math.pi / 3.0  # ~ 5.235987755982989
+_ASymptote_G_COEFF: float = 5.0 * math.pi / 2.0  # ~ 7.853981633974483
 _INT_K13_TOTAL: float = math.pi / math.sqrt(3.0)  # int_0^inf K_{1/3}(s) ds
 _Y_TILDE_CUTOFF: float = 100.0
+_INV_CDF_T_MAX: float = 30.0  # 1 - q_max = exp(-30) ~ 9.36e-14
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ def build_lcfa_table(
     chi_min: float = 1.0e-4,
     chi_max: float = 2.0e3,
     n_chi: int = 128,
-    n_q: int = 128,
+    n_q: int = 256,
 ) -> LCFATable:
     """Build precomputed LCFA rate, fraction, and inverse-CDF tables across chi."""
     if not (math.isfinite(chi_min) and math.isfinite(chi_max)) or chi_min <= 0.0 or chi_max <= chi_min:
@@ -128,7 +129,9 @@ def build_lcfa_table(
 
     chi_grid = np.geomspace(chi_min, chi_max, n_chi, dtype=np.float64)
     log_chi_grid = np.log(chi_grid)
-    q_grid = np.linspace(0.0, 1.0, n_q, dtype=np.float64)
+    s_grid = np.linspace(0.0, 1.0, n_q, dtype=np.float64)
+    t_grid = _INV_CDF_T_MAX * (s_grid**2)
+    q_grid = -np.expm1(-t_grid)
 
     g_rate = np.empty(n_chi, dtype=np.float64)
     high_energy_fraction = np.empty(n_chi, dtype=np.float64)
@@ -147,8 +150,8 @@ def build_lcfa_table(
         delta = u**3
 
         integrand = np.zeros(n_u, dtype=np.float64)
-        # Analytical u -> 0 limit of 3 u^2 * S(chi, u^3) with S(chi, delta) = (2/3)[...]
-        integrand[0] = 2.0 * g23 * ((3.0 * chi_val) ** (2.0 / 3.0))
+        # Analytical u -> 0 limit of 3 u^2 * S(chi, u^3)
+        integrand[0] = 3.0 * g23 * ((3.0 * chi_val) ** (2.0 / 3.0))
 
         pos = slice(1, n_u)
         d_pos = delta[pos]
@@ -160,9 +163,7 @@ def build_lcfa_table(
             omd_v = one_minus_d[valid]
             y_v = y_tilde[valid]
             u_v = u[1:][valid]
-            s_v = (2.0 / 3.0) * (
-                (omd_v + 1.0 / omd_v) * kv(2.0 / 3.0, y_v) - _eval_k13_tail(y_v)
-            )
+            s_v = (omd_v + 1.0 / omd_v) * kv(2.0 / 3.0, y_v) - _eval_k13_tail(y_v)
             s_v = np.maximum(0.0, s_v)
             integrand[1:][valid] = 3.0 * (u_v**2) * s_v
 
@@ -180,11 +181,15 @@ def build_lcfa_table(
             inv_cdf[i, :] = 0.0
             continue
 
-        cdf_norm = cdf / g_tot
-        # Ensure monotonicity for np.interp
-        cdf_norm = np.maximum.accumulate(cdf_norm)
-        cdf_norm[-1] = 1.0
-        inv_cdf[i, :] = np.interp(q_grid, cdf_norm, delta)
+        # Compute survival function directly from the right end to avoid 1 - cdf_norm cancellation
+        sf = np.empty(n_u, dtype=np.float64)
+        sf[-1] = 0.0
+        sf[:-1] = -cumulative_trapezoid(integrand[::-1], u[::-1])[::-1]
+        sf_norm = np.maximum(sf / g_tot, 1.0e-300)
+        neg_log_sf = -np.log(sf_norm)
+        neg_log_sf[0] = 0.0
+        neg_log_sf = np.maximum.accumulate(neg_log_sf)
+        inv_cdf[i, :] = np.interp(t_grid, neg_log_sf, delta)
         inv_cdf[i, 0] = 0.0
 
         # Cumulative mean delta = int_0^u delta(u') * integrand(u') du' / g_tot
@@ -303,7 +308,9 @@ def _lookup_inv_cdf_numba(
         ic1 = ic0 + 1
         wc = uc - ic0
 
-    uq = q * (n_q - 1)
+    t = -math.log(max(1.0 - q, 1.0e-15))
+    s = math.sqrt(min(t, _INV_CDF_T_MAX) / _INV_CDF_T_MAX)
+    uq = s * (n_q - 1)
     iq0 = int(math.floor(uq))
     if iq0 >= n_q - 1:
         iq0 = n_q - 2
@@ -582,19 +589,21 @@ def _lookup_cdf_tail_from_invcdf_numba(
         return 0.0
     if delta_cut <= 0.0:
         return 1.0
-    n_q = inv_cdf.shape[1]
-    # Binary search on q in [0, 1] using _lookup_inv_cdf_numba
-    if _lookup_inv_cdf_numba(chi, 1.0 - 1.0e-12, log_chi_grid, inv_cdf) <= delta_cut:
+    q_max = -math.expm1(-_INV_CDF_T_MAX)
+    if _lookup_inv_cdf_numba(chi, q_max, log_chi_grid, inv_cdf) <= delta_cut:
         return 0.0
     lo = 0.0
-    hi = 1.0 - 1.0e-12
-    for _ in range(20):
+    hi = 1.0
+    for _ in range(40):
         mid = 0.5 * (lo + hi)
-        if _lookup_inv_cdf_numba(chi, mid, log_chi_grid, inv_cdf) < delta_cut:
+        t_mid = mid * mid * _INV_CDF_T_MAX
+        q_mid = -math.expm1(-t_mid)
+        if _lookup_inv_cdf_numba(chi, q_mid, log_chi_grid, inv_cdf) < delta_cut:
             lo = mid
         else:
             hi = mid
-    return max(0.0, 1.0 - 0.5 * (lo + hi))
+    s_mid = 0.5 * (lo + hi)
+    return math.exp(-(s_mid * s_mid) * _INV_CDF_T_MAX)
 
 
 @njit(cache=True)
