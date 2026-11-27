@@ -111,8 +111,21 @@ def generate_field_pack(params: dict) -> dict:
         ntheta=params["ntheta"], nphi=params["nphi"], far_field=far_field,
         pol=pol,
     )
+    expected_y_flux_w = focus.expected_net_y_flux(
+        far_field,
+        f_number=f_number,
+        power_w=focal_power_w,
+        ntheta=params["ntheta"],
+        nphi=params["nphi"],
+    )
     checks = focus.compute_checks(
-        Ec, lambda0_m=lambda0_m, power_w=focal_power_w, grid=grid, Bc=Bc, pol=pol
+        Ec,
+        lambda0_m=lambda0_m,
+        power_w=focal_power_w,
+        grid=grid,
+        Bc=Bc,
+        pol=pol,
+        expected_y_flux_w=expected_y_flux_w,
     )
     extra: dict = {"mode": params["mode"]}
     if params["mode"] == "gaussian":

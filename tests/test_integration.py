@@ -139,3 +139,25 @@ def test_circular_optics_pack_qed_selection_cuts(tmp_path: Path) -> None:
     assert res.photons.weight.size > 0
     assert np.isfinite(obs["sigma_cm2"]) and obs["sigma_cm2"] >= 0.0
     assert np.isfinite(obs["eta"]) and 0.0 <= obs["eta"] <= 1.0
+
+
+@pytest.mark.parametrize("mode", ["ideal", "gaussian"])
+def test_deep_mirror_f_below_quarter_loads_in_particles(tmp_path: Path, mode: str) -> None:
+    """Verify deep-mirror (f=0.10 < 0.25) packs pass power checks and load in particles."""
+    params = cli.default_parameters()
+    params.update(
+        mode=mode,
+        f_number=0.10,
+        nx=32,
+        ny=32,
+        nz=32,
+        span_xy_m=6.4e-6,
+        span_y_m=3.2e-6,
+        ntheta=32,
+        nphi=64,
+    )
+    pack = cli.generate_field_pack(params)
+    assert pack["metadata"]["checks"]["power_conservation_rel_err"] < 0.10
+    npz_path = cli.save_field_pack(pack, out_dir=tmp_path)
+    loaded = load_field_pack(npz_path)
+    assert loaded.f_number == pytest.approx(0.10)

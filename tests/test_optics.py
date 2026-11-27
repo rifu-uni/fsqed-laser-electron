@@ -426,6 +426,34 @@ def test_default_fig4_sweep_range_and_presets():
     assert 1.5e-5 < unal[0]["chi_max_per_GeV"] < 3.0e-5
 
 
+def test_expected_net_y_flux_and_deep_mirror_power_check():
+    flux_025 = focus.expected_net_y_flux(
+        focus.bi_dipole_far_field, f_number=0.25, power_w=POWER, ntheta=64, nphi=128
+    )
+    assert np.isclose(flux_025, -POWER, rtol=1e-12)
+
+    flux_002 = focus.expected_net_y_flux(
+        focus.bi_dipole_far_field, f_number=0.02, power_w=POWER, ntheta=256, nphi=128
+    )
+    assert np.isclose(flux_002, -0.75 * POWER, rtol=0.02)
+
+    for mode in ("ideal", "gaussian"):
+        params = {
+            **cli.default_parameters(),
+            "mode": mode,
+            "f_number": 0.10,
+            "nx": 32,
+            "ny": 32,
+            "nz": 32,
+            "span_xy_m": 6.4e-6,
+            "span_y_m": 3.2e-6,
+            "ntheta": 32,
+            "nphi": 64,
+        }
+        pack = cli.generate_field_pack(params)
+        assert pack["metadata"]["checks"]["power_conservation_rel_err"] < 0.10
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

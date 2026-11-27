@@ -141,6 +141,56 @@ def align_global_phase(
     return Ec * rot, Bc * rot
 
 
+def _angular_quadrature_grid(
+    theta_max: float, ntheta: int, nphi: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build midpoint ``(theta, phi)`` ray directions and solid-angle quadrature weights."""
+    th_edges = np.linspace(0.0, theta_max, ntheta + 1)
+    th = 0.5 * (th_edges[:-1] + th_edges[1:])
+    ph = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
+    TH, PH = np.meshgrid(th, ph, indexing="ij")
+    n = np.stack(
+        [np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1
+    )
+    w = np.sin(TH) * (th_edges[1] - th_edges[0]) * (2.0 * np.pi / nphi)
+    return th, ph, n, w
+
+
+def expected_net_y_flux(
+    far_field,
+    *,
+    f_number: float,
+    power_w: float,
+    ntheta: int = 40,
+    nphi: int = 80,
+) -> float:
+    """Compute expected net time-averaged Poynting flux (W) across the ``y = 0`` focal plane.
+
+    For ``f_number >= 0.25`` (``theta_max <= pi / 2``), all rays have ``n_y < 0`` and
+    propagate in the ``-y`` direction, yielding ``-power_w``. For deep mirrors
+    (``f_number < 0.25``, ``theta_max > pi / 2``), backward rays (``n_y > 0``) cross
+    ``y = 0`` in the ``+y`` direction and partially cancel the ``-y`` flux.
+    """
+    if not callable(far_field):
+        raise ValueError("far_field must be callable")
+    if not np.isfinite(power_w) or power_w <= 0.0:
+        raise ValueError(f"power_w must be finite and positive, got {power_w}")
+    if not isinstance(ntheta, (int, np.integer)) or isinstance(ntheta, bool) or ntheta < 1:
+        raise ValueError(f"ntheta must be an integer >= 1, got {ntheta}")
+    if not isinstance(nphi, (int, np.integer)) or isinstance(nphi, bool) or nphi < 1:
+        raise ValueError(f"nphi must be an integer >= 1, got {nphi}")
+
+    theta_max = f_number_to_theta_max(f_number)
+    _, _, n, w = _angular_quadrature_grid(theta_max, int(ntheta), int(nphi))
+    far = np.asarray(far_field(n))
+    intensity_w = np.sum(np.abs(far) ** 2, axis=-1) * w
+    i2_tot = float(np.sum(intensity_w))
+    if not np.isfinite(i2_tot) or i2_tot <= 0.0:
+        raise ValueError("far-field pattern carries zero power over the aperture")
+    i2_signed = float(np.sum(np.sign(n[..., 1]) * intensity_w))
+    return float(power_w * (i2_signed / i2_tot))
+
+
 def focal_field_angular_spectrum(
     *,
     lambda0_m: float,
@@ -218,16 +268,8 @@ def focal_field_angular_spectrum(
     # Ray grid: theta measured from the -y axis (the mirror axis), phi azimuth.  This
     # (theta, phi) parameterization makes the Debye integral a plain, singularity-free
     # sum of plane waves (no 1/ky Jacobian pole at the NA=1 rim).
-    th_edges = np.linspace(0.0, theta_max, ntheta + 1)
-    th = 0.5 * (th_edges[:-1] + th_edges[1:])
-    ph = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
-    TH, PH = np.meshgrid(th, ph, indexing="ij")
-    n = np.stack(
-        [np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1
-    )
+    th, ph, n, w = _angular_quadrature_grid(theta_max, ntheta, nphi)
     far = far_field(n)  # (ntheta, nphi, 3)
-    d_theta = th_edges[1] - th_edges[0]
-    w = np.sin(TH) * d_theta * (2.0 * np.pi / nphi)  # solid-angle quadrature weight
 
     # Power normalization: P = (1/(2 eta0)) int |E_inf|^2 dOmega, with E_inf = C * far.
     I2 = float(np.sum(np.sum(np.abs(far) ** 2, axis=-1) * w))
@@ -331,13 +373,8 @@ def focal_field_slice(
     a1_name, a2_name, fixed_name = plane_map[plane]
 
     # Ray grid (theta from the -y axis, phi azimuth).
-    th_edges = np.linspace(0.0, theta_max, ntheta + 1)
-    th = 0.5 * (th_edges[:-1] + th_edges[1:])
-    ph = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
-    TH, PH = np.meshgrid(th, ph, indexing="ij")
-    n = np.stack([np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1)
+    th, ph, n, w = _angular_quadrature_grid(theta_max, ntheta, nphi)
     far = far_field(n)  # (ntheta, nphi, 3)
-    w = np.sin(TH) * (th_edges[1] - th_edges[0]) * (2.0 * np.pi / nphi)
 
     I2 = float(np.sum(np.sum(np.abs(far) ** 2, axis=-1) * w))
     if I2 <= 0.0:
@@ -422,6 +459,7 @@ def compute_checks(
     Bc: np.ndarray | None = None,
     pol: str = "z-linear",
     t_ref_s: float = 0.0,
+    expected_y_flux_w: float | None = None,
 ) -> dict:
     """Derive the self-validation metadata from a computed field pack.
 
@@ -429,6 +467,10 @@ def compute_checks(
     ``chi_max_per_GeV``, ``power_conservation_rel_err`` and ``max_location_m``.
     """
     _validate_pol(pol)
+    if not np.isfinite(power_w) or power_w <= 0.0:
+        raise ValueError(f"power_w must be finite and positive, got {power_w}")
+    if expected_y_flux_w is not None and not np.isfinite(expected_y_flux_w):
+        raise ValueError(f"expected_y_flux_w must be finite when provided, got {expected_y_flux_w}")
     omega = C.omega_from_lambda(lambda0_m)
     E_rel = C.relativistic_field_scale(omega)
 
@@ -458,8 +500,8 @@ def compute_checks(
     # outside the window), not a field error (the direct Debye B is exact).
     if B is not None:
         p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=E.shape[2] // 2)
-        # Laser propagates along -y, so Poynting flux p0 must be negative.
-        p_err = float(abs((-p0) - power_w) / power_w)
+        target_flux = -float(power_w) if expected_y_flux_w is None else float(expected_y_flux_w)
+        p_err = float(abs(p0 - target_flux) / power_w)
     else:
         p_err = 0.0
 
