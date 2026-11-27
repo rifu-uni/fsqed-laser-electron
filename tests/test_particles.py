@@ -56,6 +56,7 @@ from src.particles.qed import (
     _lookup_cdf_tail_from_invcdf_numba,
     _lookup_g_rate_numba,
     _lookup_inv_cdf_numba,
+    W0_LCFA_PER_S,
 )
 
 SAMPLE_FIELD_PATH = REPO_ROOT / "data" / "sample_field.npz"
@@ -369,7 +370,10 @@ def test_lcfa_rate_and_inverse_cdf() -> None:
         n_electrons=1024,
     )
     assert metrics_wt["sigma_cm2"] > 0.0 and metrics_mc["sigma_cm2"] > 0.0
-    assert 0.5 < metrics_mc["sigma_cm2"] / metrics_wt["sigma_cm2"] < 2.0
+    # The MC draw yields only ~9 signal photons (Poisson +-33%) and the weighted mode
+    # propagates undepleted trajectories, so the deterministic ratio for these seeds sits
+    # near 1.7; keep a tightened regression band around it.
+    assert 1.35 < metrics_mc["sigma_cm2"] / metrics_wt["sigma_cm2"] < 2.0
 
     # Exercise chi phase-space & high-chi time fraction helpers
     small_batch = sample_electron_batch(
@@ -412,6 +416,59 @@ def test_lcfa_rate_and_inverse_cdf() -> None:
         )
     with pytest.raises(ValueError, match="chi_max_ref"):
         simulate_qed_ensemble(pack, small_batch, mode="weighted", chi_max_ref=-1.0)
+
+
+def test_weighted_mode_small_loss_accumulation() -> None:
+    """Verify weighted-mode p_no_loss tracks accumulated small (delta <= 0.01) losses."""
+    table = build_lcfa_table()
+    assert np.all(table.mean_delta_small >= 0.0)
+    assert np.all(table.mean_delta2_small >= 0.0)
+    # delta <= 0.01 under the indicator, and delta^2 <= delta for delta in [0, 1]
+    assert np.all(table.mean_delta_small <= 0.01)
+    assert np.all(table.mean_delta2_small <= table.mean_delta_small)
+    assert np.all(table.mean_delta_small <= table.mean_delta_total)
+
+    # Below chi ~ 6.7e-5 every emission has delta <= 0.01, so the small-loss mean
+    # column collapses exactly onto the total mean
+    tiny = build_lcfa_table(chi_min=1.0e-7, chi_max=6.0e-5, n_chi=16, n_q=16)
+    assert np.array_equal(tiny.mean_delta_small, tiny.mean_delta_total)
+    assert np.all(tiny.mean_delta2_small >= 0.0)
+
+    pack = load_field_pack(SAMPLE_FIELD_PATH)
+    batch = sample_electron_batch(
+        n_particles=64,
+        energy_gev=10.0,
+        b_max_m=0.25 * pack.lambda0_m,
+        y0_m=pack.grid.y0_m,
+        rng=np.random.default_rng(7),
+    )
+    res_wt = simulate_qed_ensemble(pack, batch, mode="weighted")
+    p_no_loss = res_wt.p_no_loss
+
+    # Survival starts at 1.0 and is monotonically non-increasing along every trajectory
+    assert np.all(p_no_loss[:, 0] == 1.0)
+    assert np.all(np.diff(p_no_loss, axis=1) <= 0.0)
+
+    # Recompute the single-big-loss survival exp(-int w_loss_1pct dt) from the chi trace
+    dt_s = float(res_wt.t_s[1] - res_wt.t_s[0])
+    p_no_big_ref = np.ones_like(p_no_loss)
+    for i in range(p_no_loss.shape[0]):
+        hazard = 0.0
+        for n in range(p_no_loss.shape[1] - 1):
+            chi_step = float(res_wt.chi[i, n])
+            w_rad = (W0_LCFA_PER_S / batch.gamma0) * _lookup_g_rate_numba(
+                chi_step, table.log_chi_grid, table.g_rate
+            )
+            f_1pct = _interp_table_1d_numba(chi_step, table.log_chi_grid, table.loss_gt_1pct_fraction)
+            hazard += w_rad * f_1pct * dt_s
+            p_no_big_ref[i, n + 1] = math.exp(-hazard)
+
+    # p_no_loss never exceeds the big-loss-only survival bound
+    assert np.all(p_no_loss <= p_no_big_ref + 1.0e-9)
+
+    # Small-loss accumulation is active: survival drops strictly below the bound once the
+    # accumulated small losses approach the 1% depletion threshold
+    assert np.any(p_no_loss < 0.9 * p_no_big_ref)
 
 
 def test_selection_cuts_and_3sigma_shots() -> None:

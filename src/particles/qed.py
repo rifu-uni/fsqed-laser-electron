@@ -36,6 +36,8 @@ class LCFATable:
     loss_gt_1pct_fraction: np.ndarray  # (n_chi,) float64, fraction with delta > 0.01
     mean_delta_total: np.ndarray  # (n_chi,) float64, E[delta]
     mean_delta_high: np.ndarray  # (n_chi,) float64, E[delta | delta > 0.5]
+    mean_delta_small: np.ndarray  # (n_chi,) float64, E[delta * 1_{delta <= 0.01}]
+    mean_delta2_small: np.ndarray  # (n_chi,) float64, E[delta^2 * 1_{delta <= 0.01}]
     inv_cdf: np.ndarray  # (n_chi, n_q) float64, delta(chi, q)
 
 
@@ -138,6 +140,8 @@ def build_lcfa_table(
     loss_gt_1pct_fraction = np.empty(n_chi, dtype=np.float64)
     mean_delta_total = np.empty(n_chi, dtype=np.float64)
     mean_delta_high = np.empty(n_chi, dtype=np.float64)
+    mean_delta_small = np.empty(n_chi, dtype=np.float64)
+    mean_delta2_small = np.empty(n_chi, dtype=np.float64)
     inv_cdf = np.empty((n_chi, n_q), dtype=np.float64)
 
     n_u = 1025
@@ -178,6 +182,8 @@ def build_lcfa_table(
             loss_gt_1pct_fraction[i] = 0.0
             mean_delta_total[i] = 0.0
             mean_delta_high[i] = 0.0
+            mean_delta_small[i] = 0.0
+            mean_delta2_small[i] = 0.0
             inv_cdf[i, :] = 0.0
             continue
 
@@ -198,6 +204,11 @@ def build_lcfa_table(
         e_cum[1:] = cumulative_trapezoid(delta * integrand, u)
         mean_delta_total[i] = float(e_cum[-1] / g_tot)
 
+        # Cumulative mean delta^2 = int_0^u delta(u')^2 * integrand(u') du'
+        e2_cum = np.empty(n_u, dtype=np.float64)
+        e2_cum[0] = 0.0
+        e2_cum[1:] = cumulative_trapezoid((delta ** 2) * integrand, u)
+
         # Fraction above delta = 0.01
         if delta_max > 0.01:
             u_001 = 0.01 ** (1.0 / 3.0)
@@ -205,6 +216,17 @@ def build_lcfa_table(
             loss_gt_1pct_fraction[i] = max(0.0, min(1.0, (g_tot - cdf_001) / g_tot))
         else:
             loss_gt_1pct_fraction[i] = 0.0
+
+        # Small-loss moments E[delta * 1_{delta <= 0.01}] and E[delta^2 * 1_{delta <= 0.01}]
+        if delta_max > 0.01:
+            u_001 = 0.01 ** (1.0 / 3.0)
+            e_001 = float(np.interp(u_001, u, e_cum))
+            e2_001 = float(np.interp(u_001, u, e2_cum))
+            mean_delta_small[i] = e_001 / g_tot
+            mean_delta2_small[i] = e2_001 / g_tot
+        else:
+            mean_delta_small[i] = float(e_cum[-1] / g_tot)
+            mean_delta2_small[i] = float(e2_cum[-1] / g_tot)
 
         # Fraction and conditional mean above delta = 0.5
         if delta_max > 0.5:
@@ -227,6 +249,8 @@ def build_lcfa_table(
         loss_gt_1pct_fraction=loss_gt_1pct_fraction,
         mean_delta_total=mean_delta_total,
         mean_delta_high=mean_delta_high,
+        mean_delta_small=mean_delta_small,
+        mean_delta2_small=mean_delta2_small,
         inv_cdf=inv_cdf,
     )
 
@@ -607,6 +631,14 @@ def _lookup_cdf_tail_from_invcdf_numba(
 
 
 @njit(cache=True)
+def _p_small_loss_ok_numba(mean_small: float, var_small: float) -> float:
+    """Clamped Gaussian survival P(sum of small losses, each delta <= 0.01, stays < 0.01)."""
+    if var_small <= 0.0:
+        return 1.0 if mean_small < 0.01 else 0.0
+    return 0.5 * math.erfc((mean_small - 0.01) / math.sqrt(2.0 * var_small))
+
+
+@njit(cache=True)
 def _simulate_weighted_numba(
     r0_m: np.ndarray,
     p0_kgms: np.ndarray,
@@ -638,6 +670,8 @@ def _simulate_weighted_numba(
     loss_gt_1pct_fraction: np.ndarray,
     mean_delta_total: np.ndarray,
     mean_delta_high: np.ndarray,
+    mean_delta_small: np.ndarray,
+    mean_delta2_small: np.ndarray,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -686,6 +720,9 @@ def _simulate_weighted_numba(
         jitter = dt_jitter_s[i]
         b_imp = b_impact_m[i]
         p_no_loss = 1.0
+        p_no_big = 1.0
+        cum_small_mean = 0.0
+        cum_small_var = 0.0
         gamma_avg = gamma0
 
         for n in range(n_steps):
@@ -742,7 +779,16 @@ def _simulate_weighted_numba(
                     mean_dtot_0 = _interp_table_1d_numba(chi_curr, log_chi_grid, mean_delta_total)
 
                     w_loss_1pct = w_rad_0 * f_1pct
-                    p_no_loss_mid = p_no_loss * math.exp(-0.5 * w_loss_1pct * dt_s)
+                    mean_ds = _interp_table_1d_numba(chi_curr, log_chi_grid, mean_delta_small)
+                    mean_d2s = _interp_table_1d_numba(chi_curr, log_chi_grid, mean_delta2_small)
+
+                    # Mid-step no-loss survival: no single delta > 0.01 emission (p_no_big_mid)
+                    # and accumulated small losses (each delta <= 0.01) still below 0.01 in total
+                    p_no_big_mid = p_no_big * math.exp(-0.5 * w_loss_1pct * dt_s)
+                    m_mid = cum_small_mean + 0.5 * w_rad_0 * mean_ds * dt_s
+                    v_mid = cum_small_var + 0.5 * w_rad_0 * mean_d2s * dt_s
+                    p_small_ok_mid = _p_small_loss_ok_numba(m_mid, v_mid)
+                    p_no_loss_mid = max(0.0, min(p_no_loss, p_no_big_mid * p_small_ok_mid))
 
                     # Fresh (non-depleted) branch: gamma_prior = gamma0 >= 0.99 * gamma0
                     dw_fresh = p_no_loss_mid * w_rad_0 * f_high_0 * dt_s
@@ -788,7 +834,11 @@ def _simulate_weighted_numba(
                                 ph_idx[n_ph] = i
                                 n_ph += 1
 
-                    p_no_loss = p_no_loss * math.exp(-w_loss_1pct * dt_s)
+                    p_no_big = p_no_big * math.exp(-w_loss_1pct * dt_s)
+                    cum_small_mean = cum_small_mean + w_rad_0 * mean_ds * dt_s
+                    cum_small_var = cum_small_var + w_rad_0 * mean_d2s * dt_s
+                    p_small_ok_end = _p_small_loss_ok_numba(cum_small_mean, cum_small_var)
+                    p_no_loss = max(0.0, min(p_no_loss, p_no_big * p_small_ok_end))
                     if gamma_avg > 1.0:
                         chi_avg = chi_curr * (gamma_avg / gamma0)
                         g_avg = _lookup_g_rate_numba(chi_avg, log_chi_grid, g_rate)
@@ -919,6 +969,8 @@ def simulate_qed_ensemble(
             tbl.loss_gt_1pct_fraction,
             tbl.mean_delta_total,
             tbl.mean_delta_high,
+            tbl.mean_delta_small,
+            tbl.mean_delta2_small,
         )
 
     (
