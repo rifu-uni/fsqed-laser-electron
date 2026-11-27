@@ -352,6 +352,42 @@ def test_cli_account_for_losses_scales_focal_power_and_kappa():
     )
 
 
+def test_area_weighted_mse_rmse_and_correlation():
+    R = np.linspace(0.0, 1.0, 2001)
+    ones = np.ones_like(R)
+    ident = comparison.compare_profiles(ones, 3.0 * ones, R)
+    assert ident["mse"] == pytest.approx(0.0, abs=1e-14)
+    assert ident["rmse"] == pytest.approx(0.0, abs=1e-14)
+
+    # Analytic benchmark: I1 = 1 -> norm 2, I2 = R^2 -> norm 4 R^2 => MSE = 4/3.
+    res = comparison.compare_profiles(ones, R ** 2, R)
+    assert np.isclose(res["mse"], 4.0 / 3.0, rtol=1e-5)
+    assert np.isclose(res["rmse"], np.sqrt(4.0 / 3.0), rtol=1e-5)
+
+    # Exact affine correlation (+/-1) under area-weighted inner product.
+    pos = comparison.compare_profiles(1.0 + R ** 2, 1.0 + 2.0 * R ** 2, R)
+    neg = comparison.compare_profiles(1.0 + R ** 2, 2.0 - R ** 2, R)
+    assert pos["correlation"] == pytest.approx(1.0, abs=1e-12)
+    assert neg["correlation"] == pytest.approx(-1.0, abs=1e-12)
+
+    # Outer-radius error carries larger area weight than inner-radius error.
+    base = np.ones_like(R)
+    inner = base.copy()
+    outer = base.copy()
+    inner[(R >= 0.1) & (R <= 0.2)] += 0.5
+    outer[(R >= 0.8) & (R <= 0.9)] += 0.5
+    err_in = comparison.compare_profiles(base, inner, R)
+    err_out = comparison.compare_profiles(base, outer, R)
+    assert err_out["mse"] > err_in["mse"]
+    assert err_out["rmse"] > err_in["rmse"]
+
+    rep = comparison.summarize_degradation(f_number=F_NUMBER)
+    assert np.isclose(rep["rmse"], np.sqrt(rep["mse"]), rtol=1e-12)
+
+    with pytest.raises(ValueError, match="R must be"):
+        comparison.compare_profiles(ones, ones, -R)
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

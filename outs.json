@@ -26,10 +26,10 @@
     "t_ref_s": 0.0
   },
   "checks": {
-    "a_max": 509.6701108015546,
+    "a_max": 509.6701108015545,
     "a_max_expected": 551.543289325507,
-    "chi_max_per_GeV": 6.050001704700865,
-    "power_conservation_rel_err": 0.015003581811294625,
+    "chi_max_per_GeV": 6.050001704700864,
+    "power_conservation_rel_err": 0.015003581811294376,
     "max_location_m": [
       0.0,
       0.0,
@@ -42,9 +42,17 @@
   "w0_over_rmax": 0.7,
   "apod_order": 8.0,
   "degradation": {
-    "mse": 0.7271367701659123,
-    "correlation": 0.9999100023166925,
+    "mse": 0.2971812826425743,
+    "rmse": 0.5451433597161157,
+    "correlation": 0.9997847107608588,
     "transmission": 0.981960787976708,
-    "f_number": 0.25
+    "aperture_transmission": 0.9831201158512101,
+    "total_transmission": 0.9653854036370068,
+    "f_number": 0.25,
+    "kappa_eff_focal": 4.840001363760691,
+    "kappa_eff_effective": 4.7554962996190016,
+    "source_power_W": 1000000000000000.0,
+    "focal_power_W": 1000000000000000.0,
+    "account_for_losses": false
   }
 }

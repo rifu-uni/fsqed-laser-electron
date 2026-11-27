@@ -2,8 +2,8 @@
 
 The analytic Sheppard-Larkin profile ``I^p(R)`` (eq. 13) is the *ideal* reference
 baseline; the Gaussian-beam x apodizer profile is the *realistic* simulation input.
-This module computes the mean squared error (MSE), the Pearson correlation and the
-apodizer power transmission between the two.
+This module computes the circular-disk area-weighted mean squared error (MSE), root
+mean squared error (RMSE), Pearson correlation, and power transmission between the two.
 """
 
 from __future__ import annotations
@@ -11,6 +11,28 @@ from __future__ import annotations
 import numpy as np
 
 from . import gaussian
+
+
+def _validate_radial_grid(R: np.ndarray) -> tuple[np.ndarray, float]:
+    """Validate a strictly increasing non-negative 1-D radial grid and return its area norm."""
+    r_arr = np.asarray(R, dtype=np.float64)
+    if (
+        r_arr.ndim != 1
+        or r_arr.size < 2
+        or not np.all(np.isfinite(r_arr))
+        or np.any(r_arr < 0.0)
+        or np.any(np.diff(r_arr) <= 0.0)
+    ):
+        raise ValueError("R must be a finite, strictly increasing, non-negative 1D array with >= 2 points")
+    area_norm = float(np.trapezoid(r_arr, r_arr))
+    if area_norm <= 0.0:
+        raise ValueError("Radial grid must span a positive aperture area")
+    return r_arr, area_norm
+
+
+def _area_mean(values: np.ndarray, r_arr: np.ndarray, area_norm: float) -> float:
+    """Compute the circular-aperture area-weighted mean ``int values * R dR / int R dR``."""
+    return float(np.trapezoid(values * r_arr, r_arr) / area_norm)
 
 
 def incident_intensity_profiles(*, f_number, w0_over_rmax=0.7, apod_order=8.0, nr=512):
@@ -29,18 +51,36 @@ def _normalize_power(I, R):
 
 
 def compare_profiles(I_ideal, I_real, R):
-    """Return ``{"mse": ..., "correlation": ...}`` for two intensity profiles.
+    """Return area-weighted ``{"mse", "rmse", "correlation"}`` for two intensity profiles.
 
-    Both profiles are normalized to unit total power over the aperture first.
+    Both profiles are normalized to unit total radial power (``int I(R) R dR = 1``)
+    first, and all moments are weighted by ``R dR`` over the circular mirror aperture.
     """
-    Ii = _normalize_power(I_ideal, R)
-    Ir = _normalize_power(I_real, R)
-    mse = float(np.mean((Ii - Ir) ** 2))
-    if np.std(Ii) > 0.0 and np.std(Ir) > 0.0:
-        corr = float(np.corrcoef(Ii, Ir)[0, 1])
+    r_arr, area_norm = _validate_radial_grid(R)
+    i_ideal_arr = np.asarray(I_ideal, dtype=np.float64)
+    i_real_arr = np.asarray(I_real, dtype=np.float64)
+    if i_ideal_arr.shape != r_arr.shape or i_real_arr.shape != r_arr.shape:
+        raise ValueError("I_ideal and I_real must have the same 1D shape as R")
+    if not np.all(np.isfinite(i_ideal_arr)) or not np.all(np.isfinite(i_real_arr)):
+        raise ValueError("Intensity profiles must contain only finite values")
+
+    Ii = _normalize_power(i_ideal_arr, r_arr)
+    Ir = _normalize_power(i_real_arr, r_arr)
+    diff = Ii - Ir
+    mse = _area_mean(diff * diff, r_arr, area_norm)
+    rmse = float(np.sqrt(max(mse, 0.0)))
+
+    mi = _area_mean(Ii, r_arr, area_norm)
+    mr = _area_mean(Ir, r_arr, area_norm)
+    di = Ii - mi
+    dr = Ir - mr
+    vi = _area_mean(di * di, r_arr, area_norm)
+    vr = _area_mean(dr * dr, r_arr, area_norm)
+    if vi > 0.0 and vr > 0.0:
+        corr = float(np.clip(_area_mean(di * dr, r_arr, area_norm) / np.sqrt(vi * vr), -1.0, 1.0))
     else:
         corr = 0.0
-    return {"mse": mse, "correlation": corr}
+    return {"mse": mse, "rmse": rmse, "correlation": corr}
 
 
 def aperture_transmission(w0_over_rmax: float) -> float:
