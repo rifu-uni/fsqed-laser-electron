@@ -17,8 +17,11 @@ f-number.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
+from . import comparison
 from . import constants as C
 from . import focus
 
@@ -89,6 +92,19 @@ def gaussian_far_field_builder(
     return build
 
 
+def gaussian_transmission(
+    w0_over_rmax: float = 0.7,
+    apod_order: float = 8.0,
+    *,
+    include_aperture_truncation: bool = True,
+    nr: int = 512,
+) -> float:
+    """Return source-to-focus power transmission for the Gaussian + apodizer system."""
+    if include_aperture_truncation:
+        return comparison.total_transmission(w0_over_rmax, apod_order, nr=nr)
+    return comparison.apodizer_transmission(w0_over_rmax, apod_order, nr=nr)
+
+
 def kappa_eff_vs_f_number(
     f_numbers,
     *,
@@ -96,18 +112,24 @@ def kappa_eff_vs_f_number(
     power_w: float = 1.0e15,
     energy_gev: float = 1.0,
     far_field_builder=None,
+    power_transmission: float | Callable[[float], float] = 1.0,
     ntheta: int = 256,
     nphi: int = 512,
 ) -> list[dict]:
-    """Compute ``chi_max`` and ``a_max`` for each f-number (the Fig. 4 curve).
+    """Compute ``chi_max``, ``a_max``, and ``kappa_eff`` for each f-number (Fig. 4).
 
     Parameters
     ----------
     far_field_builder : callable, optional
         ``far_field_builder(f_number) -> far_field(n)``.  Defaults to the ideal
         Sheppard-Larkin baseline.
+    power_transmission : float or callable, optional
+        Fraction ``T in (0, 1]`` of source ``power_w`` delivered through the
+        aperture/apodizer to the mirror focus (or ``callable(f_number) -> T``).
+        Defaults to ``1.0`` (lossless).
 
-    Returns a list of dicts with keys ``f_number``, ``chi_max_per_GeV``, ``a_max``.
+    Returns a list of dicts with keys ``f_number``, ``theta_max_deg``,
+    ``chi_max_per_GeV``, ``a_max``, ``kappa_eff``, ``transmission``.
     """
     if far_field_builder is None:
         far_field_builder = ideal_far_field_builder()
@@ -115,12 +137,17 @@ def kappa_eff_vs_f_number(
     omega = C.omega_from_lambda(lambda0_m)
     E_rel = C.relativistic_field_scale(omega)
     gamma = C.energy_gev_to_gamma(energy_gev)
+    eq1_scale = float(np.sqrt(power_w / 1.0e15) * (1.0e-6 / lambda0_m))
 
     out = []
     for fn in f_numbers:
+        t_val = float(power_transmission(fn)) if callable(power_transmission) else float(power_transmission)
+        if not np.isfinite(t_val) or t_val <= 0.0 or t_val > 1.0:
+            raise ValueError(f"power_transmission must be finite in (0, 1], got {t_val}")
+
         far_field = far_field_builder(fn)
         E0 = focal_field_vector(
-            far_field, f_number=fn, lambda0_m=lambda0_m, power_w=power_w,
+            far_field, f_number=fn, lambda0_m=lambda0_m, power_w=power_w * t_val,
             ntheta=ntheta, nphi=nphi,
         )
         # Exact peak instantaneous real field amplitude over an optical cycle
@@ -134,7 +161,16 @@ def kappa_eff_vs_f_number(
         e_perp_dot_abs = float(abs(E0[0] ** 2 + E0[2] ** 2))
         e_perp_peak = float(np.sqrt(0.5 * (e_perp_abs2 + e_perp_dot_abs)))
         chi_max_per_gev = 2.0 * gamma * e_perp_peak / C.E_CRIT / energy_gev
-        out.append({"f_number": float(fn), "chi_max_per_GeV": chi_max_per_gev, "a_max": a_max})
+        kappa_eff = chi_max_per_gev / eq1_scale
+        theta_max_deg = float(np.degrees(focus.f_number_to_theta_max(float(fn))))
+        out.append({
+            "f_number": float(fn),
+            "theta_max_deg": theta_max_deg,
+            "chi_max_per_GeV": chi_max_per_gev,
+            "a_max": a_max,
+            "kappa_eff": kappa_eff,
+            "transmission": t_val,
+        })
     return out
 
 

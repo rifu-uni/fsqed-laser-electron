@@ -43,8 +43,21 @@ def compare_profiles(I_ideal, I_real, R):
     return {"mse": mse, "correlation": corr}
 
 
+def aperture_transmission(w0_over_rmax: float) -> float:
+    """Fraction of collimated Gaussian beam power enclosed within ``r <= 1``."""
+    if not np.isfinite(w0_over_rmax) or w0_over_rmax <= 0.0:
+        raise ValueError(f"w0_over_rmax must be finite and positive, got {w0_over_rmax}")
+    return float(1.0 - np.exp(-2.0 / (w0_over_rmax ** 2)))
+
+
 def apodizer_transmission(w0_over_rmax, apod_order, nr=512):
-    """Apodizer power transmission ``P_after / P_before`` for the Gaussian beam."""
+    """Apodizer power transmission ``P_after / P_in_aperture`` for the Gaussian beam."""
+    if not np.isfinite(w0_over_rmax) or w0_over_rmax <= 0.0:
+        raise ValueError(f"w0_over_rmax must be finite and positive, got {w0_over_rmax}")
+    if not np.isfinite(apod_order) or apod_order <= 0.0:
+        raise ValueError(f"apod_order must be finite and positive, got {apod_order}")
+    if int(nr) < 2:
+        raise ValueError(f"nr must be >= 2, got {nr}")
     R = np.linspace(0.0, 1.0, nr)
     gauss2 = gaussian.gaussian_source(R, w0_over_rmax) ** 2
     apod2 = gaussian.apodizer(R, 1.0, order=apod_order) ** 2
@@ -53,12 +66,24 @@ def apodizer_transmission(w0_over_rmax, apod_order, nr=512):
     return float(p_out / p_in) if p_in > 0.0 else 0.0
 
 
+def total_transmission(w0_over_rmax: float, apod_order: float, nr: int = 512) -> float:
+    """Total source-to-focus power transmission (aperture truncation x apodizer)."""
+    return float(
+        aperture_transmission(w0_over_rmax)
+        * apodizer_transmission(w0_over_rmax, apod_order, nr=nr)
+    )
+
+
 def summarize_degradation(*, f_number, w0_over_rmax=0.7, apod_order=8.0, nr=512):
     """Full quantitative degradation report of the realistic vs ideal profile."""
     R, I_ideal, I_real = incident_intensity_profiles(
         f_number=f_number, w0_over_rmax=w0_over_rmax, apod_order=apod_order, nr=nr
     )
     result = compare_profiles(I_ideal, I_real, R)
-    result["transmission"] = apodizer_transmission(w0_over_rmax, apod_order, nr)
+    ap_t = aperture_transmission(w0_over_rmax)
+    apod_t = apodizer_transmission(w0_over_rmax, apod_order, nr)
+    result["transmission"] = apod_t
+    result["aperture_transmission"] = ap_t
+    result["total_transmission"] = float(ap_t * apod_t)
     result["f_number"] = float(f_number)
     return result

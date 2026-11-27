@@ -48,6 +48,7 @@ def default_parameters() -> dict:
         "ntheta": 32,
         "nphi": 64,
         "focal_length_m": None,
+        "account_for_losses": False,
     }
 
 
@@ -71,34 +72,51 @@ def generate_field_pack(params: dict) -> dict:
 
     lambda0_m = params["lambda0_m"]
     f_number = params["f_number"]
-    power_w = params["power_w"]
+    source_power_w = float(params["power_w"])
     n_cycles = params.get("n_cycles")
     tau_fwhm_s = params.get("tau_fwhm_s")
     if tau_fwhm_s is None and n_cycles is not None:
         tau_fwhm_s = C.tau_fwhm_from_cycles(n_cycles, lambda0_m)
 
+    account_for_losses = bool(params.get("account_for_losses", False))
+    degradation = None
+    focal_power_w = source_power_w
+    if params["mode"] == "gaussian":
+        degradation = comparison.summarize_degradation(
+            f_number=f_number,
+            w0_over_rmax=params["w0_over_rmax"],
+            apod_order=params["apod_order"],
+        )
+        if account_for_losses:
+            focal_power_w = source_power_w * float(degradation["total_transmission"])
+
     far_field = build_far_field(params)
     Ec, Bc, grid = focus.focal_field_angular_spectrum(
-        lambda0_m=lambda0_m, f_number=f_number, power_w=power_w,
+        lambda0_m=lambda0_m, f_number=f_number, power_w=focal_power_w,
         nx=params["nx"], ny=params["ny"], nz=params["nz"],
         span_xy_m=params["span_xy_m"], span_y_m=params["span_y_m"],
         ntheta=params["ntheta"], nphi=params["nphi"], far_field=far_field,
         pol=pol,
     )
     checks = focus.compute_checks(
-        Ec, lambda0_m=lambda0_m, power_w=power_w, grid=grid, Bc=Bc, pol=pol
+        Ec, lambda0_m=lambda0_m, power_w=focal_power_w, grid=grid, Bc=Bc, pol=pol
     )
     extra: dict = {"mode": params["mode"]}
     if params["mode"] == "gaussian":
+        assert degradation is not None
+        scale_focal = float(np.sqrt(focal_power_w / 1.0e15) * (1.0e-6 / lambda0_m))
+        kappa_eff_focal = float(checks["chi_max_per_GeV"] / scale_focal)
+        total_t = float(degradation["total_transmission"])
+        degradation["kappa_eff_focal"] = kappa_eff_focal
+        degradation["kappa_eff_effective"] = float(kappa_eff_focal * np.sqrt(total_t))
+        degradation["source_power_W"] = source_power_w
+        degradation["focal_power_W"] = focal_power_w
+        degradation["account_for_losses"] = account_for_losses
         extra["w0_over_rmax"] = params["w0_over_rmax"]
         extra["apod_order"] = params["apod_order"]
-        extra["degradation"] = comparison.summarize_degradation(
-            f_number=f_number,
-            w0_over_rmax=params["w0_over_rmax"],
-            apod_order=params["apod_order"],
-        )
+        extra["degradation"] = degradation
     metadata = meta_mod.build_metadata(
-        lambda0_m=lambda0_m, f_number=f_number, power_w=power_w,
+        lambda0_m=lambda0_m, f_number=f_number, power_w=focal_power_w,
         pol=params["pol"], grid=grid, checks=checks,
         tau_fwhm_s=tau_fwhm_s, n_cycles=n_cycles,
         focal_length_m=params["focal_length_m"],
@@ -146,6 +164,11 @@ def main(argv=None) -> int:
     parser.add_argument("--ntheta", type=int, default=32)
     parser.add_argument("--nphi", type=int, default=64)
     parser.add_argument("--focal-length-m", type=float, default=None)
+    parser.add_argument(
+        "--account-for-losses",
+        action="store_true",
+        help="Scale focal power in gaussian mode by aperture*apodizer total transmission.",
+    )
     parser.add_argument("--out-json", default=str(REPO_ROOT / "outs.json"))
     args = parser.parse_args(argv)
 
@@ -171,6 +194,7 @@ def main(argv=None) -> int:
         "ntheta": args.ntheta,
         "nphi": args.nphi,
         "focal_length_m": args.focal_length_m,
+        "account_for_losses": args.account_for_losses,
     }
 
     pack = generate_field_pack(params)

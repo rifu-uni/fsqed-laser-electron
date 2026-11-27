@@ -295,6 +295,63 @@ def test_build_metadata_extra_rejects_collision():
         )
 
 
+def test_transmission_bounds_and_monotonicity():
+    t_ap_narrow = comparison.aperture_transmission(0.5)
+    t_ap_wide = comparison.aperture_transmission(0.9)
+    assert 0.0 < t_ap_wide < t_ap_narrow <= 1.0
+    t_apod = comparison.apodizer_transmission(0.7, 8.0)
+    t_tot = comparison.total_transmission(0.7, 8.0)
+    assert 0.0 < t_apod <= 1.0
+    assert np.isclose(t_tot, comparison.aperture_transmission(0.7) * t_apod, rtol=1e-12)
+    rep = comparison.summarize_degradation(f_number=F_NUMBER)
+    assert np.isclose(rep["total_transmission"], t_tot, rtol=1e-12)
+
+
+def test_kappa_sweep_folds_power_transmission():
+    fns = [0.25, 1.0]
+    t_val = sweep.gaussian_transmission(0.7, 8.0)
+    base = sweep.kappa_eff_vs_f_number(
+        fns, lambda0_m=1.0e-6, power_w=POWER,
+        far_field_builder=sweep.gaussian_far_field_builder(), ntheta=64, nphi=128,
+    )
+    scaled_scalar = sweep.kappa_eff_vs_f_number(
+        fns, lambda0_m=1.0e-6, power_w=POWER,
+        far_field_builder=sweep.gaussian_far_field_builder(),
+        power_transmission=t_val, ntheta=64, nphi=128,
+    )
+    scaled_fn = sweep.kappa_eff_vs_f_number(
+        fns, lambda0_m=1.0e-6, power_w=POWER,
+        far_field_builder=sweep.gaussian_far_field_builder(),
+        power_transmission=lambda _fn: t_val, ntheta=64, nphi=128,
+    )
+    for r0, r1, r2 in zip(base, scaled_scalar, scaled_fn):
+        assert np.isclose(r1["chi_max_per_GeV"], r0["chi_max_per_GeV"] * np.sqrt(t_val), rtol=1e-12)
+        assert np.isclose(r1["a_max"], r0["a_max"] * np.sqrt(t_val), rtol=1e-12)
+        assert np.isclose(r1["kappa_eff"], r0["kappa_eff"] * np.sqrt(t_val), rtol=1e-12)
+        assert r1["transmission"] == pytest.approx(t_val)
+        assert r2 == pytest.approx(r1)
+
+    with pytest.raises(ValueError, match="power_transmission"):
+        sweep.kappa_eff_vs_f_number([0.25], power_transmission=0.0)
+    with pytest.raises(ValueError, match="power_transmission"):
+        sweep.kappa_eff_vs_f_number([0.25], power_transmission=1.2)
+
+
+def test_cli_account_for_losses_scales_focal_power_and_kappa():
+    base_params = {**cli.default_parameters(), "nx": 16, "ny": 16, "nz": 16, "ntheta": 16, "nphi": 32}
+    lossless = cli.generate_field_pack({**base_params, "account_for_losses": False})
+    lossy = cli.generate_field_pack({**base_params, "account_for_losses": True})
+    t_tot = lossless["metadata"]["degradation"]["total_transmission"]
+    assert np.isclose(lossy["metadata"]["power_W"], POWER * t_tot, rtol=1e-12)
+    assert np.isclose(lossy["metadata"]["checks"]["a_max"], lossless["metadata"]["checks"]["a_max"] * np.sqrt(t_tot), rtol=1e-12)
+    assert 0.0 < lossy["metadata"]["checks"]["power_conservation_rel_err"] < 0.10
+    assert np.isclose(
+        lossy["metadata"]["degradation"]["kappa_eff_effective"],
+        lossy["metadata"]["degradation"]["kappa_eff_focal"] * np.sqrt(t_tot),
+        rtol=1e-12,
+    )
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
