@@ -90,21 +90,22 @@ def generate_field_pack(params: dict) -> dict:
     checks = focus.compute_checks(
         Ec, lambda0_m=lambda0_m, power_w=power_w, grid=grid, Bc=Bc
     )
+    extra: dict = {"mode": params["mode"]}
+    if params["mode"] == "gaussian":
+        extra["w0_over_rmax"] = params["w0_over_rmax"]
+        extra["apod_order"] = params["apod_order"]
+        extra["degradation"] = comparison.summarize_degradation(
+            f_number=f_number,
+            w0_over_rmax=params["w0_over_rmax"],
+            apod_order=params["apod_order"],
+        )
     metadata = meta_mod.build_metadata(
         lambda0_m=lambda0_m, f_number=f_number, power_w=power_w,
         pol=params["pol"], grid=grid, checks=checks,
         tau_fwhm_s=tau_fwhm_s, n_cycles=n_cycles,
         focal_length_m=params["focal_length_m"],
+        extra=extra,
     )
-    metadata["mode"] = params["mode"]
-    if params["mode"] == "gaussian":
-        metadata["w0_over_rmax"] = params["w0_over_rmax"]
-        metadata["apod_order"] = params["apod_order"]
-        metadata["degradation"] = comparison.summarize_degradation(
-            f_number=f_number,
-            w0_over_rmax=params["w0_over_rmax"],
-            apod_order=params["apod_order"],
-        )
     return {"Ec": Ec, "Bc": Bc, "metadata": metadata}
 
 

@@ -196,6 +196,34 @@ def test_circular_pol_rejected_loudly():
         cli.generate_field_pack(params)
 
 
+def test_focal_field_slice_matches_3d_center_plane():
+    Ec_3d, _, _ = focus.focal_field_angular_spectrum(
+        lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER,
+        nx=16, ny=16, nz=16, span_xy_m=3.2e-6, span_y_m=3.2e-6,
+        ntheta=16, nphi=32,
+    )
+    Ec_slice, _, _, _ = focus.focal_field_slice(
+        lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER,
+        plane="y", coord_m=0.0, n1=16, n2=16,
+        span1_m=3.2e-6, span2_m=3.2e-6, ntheta=16, nphi=32,
+    )
+    ec_3d_plane = Ec_3d[0, :, :, 8, :]
+    assert np.allclose(np.abs(Ec_slice), np.abs(ec_3d_plane), rtol=1e-12)
+    ref = Ec_slice[2, 8, 8]
+    aligned_slice = Ec_slice * (np.conj(ref) / abs(ref))
+    assert np.allclose(aligned_slice, ec_3d_plane, rtol=1e-12)
+
+
+def test_build_metadata_extra_rejects_collision():
+    _, _, grid, checks = _compute_small()
+    with pytest.raises(ValueError, match="cannot overwrite core fields"):
+        meta_mod.build_metadata(
+            lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER, pol="z-linear",
+            grid=grid, checks=checks, tau_fwhm_s=30.0e-15,
+            extra={"pol": "circular"},
+        )
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

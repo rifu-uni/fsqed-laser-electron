@@ -224,15 +224,13 @@ def focal_field_angular_spectrum(
     Bc = np.zeros((3, nz, ny, nx), dtype=np.complex128)
     for i in range(ntheta):
         sth = np.sin(th[i])
-        # Phase factors that depend only on phi (shared by the theta ring).
         gx = np.exp(-1j * k * np.outer(sth * np.cos(ph), X))  # (nphi, nx)
         gz = np.exp(-1j * k * np.outer(sth * np.sin(ph), Z))  # (nphi, nz)
-        ph_y = np.exp(-1j * k * (-np.cos(th[i])) * Y)  # (ny,)
-        for j in range(nphi):
-            phase = gz[j][:, None, None] * ph_y[None, :, None] * gx[j][None, None, :]
-            for comp in range(3):
-                Ec[comp] += amp[i, j, comp] * phase
-                Bc[comp] += amp_B[i, j, comp] * phase
+        ph_y = np.exp(-1j * k * (-np.cos(th[i])) * Y)         # (ny,)
+        slice_E = np.einsum("pc,pz,px->czx", amp[i], gz, gx)
+        slice_B = np.einsum("pc,pz,px->czx", amp_B[i], gz, gx)
+        Ec += slice_E[:, :, None, :] * ph_y[None, None, :, None]
+        Bc += slice_B[:, :, None, :] * ph_y[None, None, :, None]
 
     Ec, Bc = align_global_phase(Ec, Bc)
     grid = {
@@ -330,18 +328,16 @@ def focal_field_slice(
     for i in range(ntheta):
         sth = np.sin(th[i])
         cth = np.cos(th[i])
-        for j in range(nphi):
-            nxv = sth * np.cos(ph[j])
-            nyv = -cth
-            nzv = sth * np.sin(ph[j])
-            n_comp = {"x": nxv, "y": nyv, "z": nzv}
-            # 2-D phase = exp(-i k (n_a1 a1 + n_a2 a2 + n_fixed coord_m)).
-            f1 = np.exp(-1j * k * n_comp[a1_name] * axis1)   # (n1,)
-            f2 = np.exp(-1j * k * n_comp[a2_name] * axis2)   # (n2,)
-            fixed = np.exp(-1j * k * n_comp[fixed_name] * coord_m)
-            phase = f2[:, None] * f1[None, :] * fixed        # (n2, n1)
-            for comp in range(3):
-                Ec[comp] += amp[i, j, comp] * phase
+        n_comp = {
+            "x": sth * np.cos(ph),
+            "y": np.full_like(ph, -cth),
+            "z": sth * np.sin(ph),
+        }
+        f1 = np.exp(-1j * k * np.outer(n_comp[a1_name], axis1))     # (nphi, n1)
+        f2 = np.exp(-1j * k * np.outer(n_comp[a2_name], axis2))     # (nphi, n2)
+        fixed = np.exp(-1j * k * n_comp[fixed_name] * coord_m)       # (nphi,)
+        amp_ring = amp[i] * fixed[:, None]                           # (nphi, 3)
+        Ec += np.einsum("pc,pb,pa->cba", amp_ring, f2, f1)
 
     grid = {
         a1_name: (float(a1_start), float(a1_step), int(n1)),

@@ -115,6 +115,7 @@ def build_metadata(
     n_cycles: float | None = None,
     t_ref_s: float = 0.0,
     focal_length_m: float | None = None,
+    extra: dict | None = None,
 ) -> dict:
     """Assemble the field-pack metadata dict conforming to ``data/schema.json``.
 
@@ -153,6 +154,11 @@ def build_metadata(
         meta["n_cycles"] = float(n_cycles)
     if focal_length_m is not None:
         meta["R_max_m"] = float(focal_length_m / (2.0 * f_number))
+    if extra is not None:
+        collisions = sorted(set(extra) & set(meta))
+        if collisions:
+            raise ValueError(f"extra metadata keys cannot overwrite core fields: {collisions}")
+        meta.update(extra)
 
     validate(meta)
     return meta
