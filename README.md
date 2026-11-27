@@ -36,7 +36,7 @@ The optics module exposes two execution modes through the CLI
 
 ```bash
 # Realistic optical pipeline (default): Gaussian beam + apodizer + mirror reflection
-pixi run python -m src.optics --mode gaussian --power-w 1e15 --tau-fwhm-s 30e-15 --w0-over-rmax 0.7 --apod-order 8
+pixi run python -m src.optics --mode gaussian --power-w 1e15 --n-cycles 5 --w0-over-rmax 0.7 --apod-order 8
 
 # Ideal analytic baseline: Sheppard-Larkin far field injected directly
 pixi run python -m src.optics --mode ideal

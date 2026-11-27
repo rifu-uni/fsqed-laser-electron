@@ -21,8 +21,8 @@
   "pulse": {
     "model": "gauss",
     "convention": "intensity_fwhm",
-    "tau_fwhm_s": 3e-14,
-    "sigma_t_s": 1.8016836131796746e-14,
+    "tau_fwhm_s": 1.3342563807926082e-14,
+    "sigma_t_s": 8.013026190181542e-15,
     "t_ref_s": 0.0
   },
   "checks": {

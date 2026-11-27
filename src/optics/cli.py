@@ -178,7 +178,7 @@ def main(argv=None) -> int:
         "--preset",
         choices=["paper", "unal"],
         default="paper",
-        help="Laser preset: 'paper' (1 PW, 0.8 um, 30 fs) or 'unal' (13 kW, 0.8 um, 170 fs).",
+        help="Laser preset: 'paper' (1 PW, 0.8 um, 5 cycles / 13.3 fs) or 'unal' (13 kW, 0.8 um, 170 fs).",
     )
     parser.add_argument("--mode", choices=["ideal", "gaussian"], default="gaussian")
     parser.add_argument("--lambda0-m", type=float, default=None)

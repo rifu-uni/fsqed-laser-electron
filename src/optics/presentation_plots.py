@@ -215,7 +215,7 @@ def image_profile(out: Path, ideal_slices, gauss_slices) -> None:
 
     fig, axes = plt.subplots(1, 2, figsize=(12.2, 4.8), constrained_layout=True)
     configs = [
-        (axes[0], 1.0, 1e14, "Paper FSQED (1 PW, 0.8 µm, 30 fs)", r"$|E|\ (10^{14}\ \mathrm{V/m})$"),
+        (axes[0], 1.0, 1e14, "Paper FSQED (1 PW, 0.8 µm, 5 cycles)", r"$|E|\ (10^{14}\ \mathrm{V/m})$"),
         (axes[1], unal_field_scale, 1e9, "UNAL Ti:Sapphire (13 kW, 0.8 µm, 170 fs)", r"$|E|\ (10^{9}\ \mathrm{V/m})$"),
     ]
     for ax, fscale, norm, title, ylabel in configs:

@@ -51,7 +51,7 @@ PAPER_FIG4_LASER: dict[str, float] = {
 PAPER_FSQED_LASER: dict[str, float] = {
     "lambda0_m": 0.8e-6,
     "power_w": 1.0e15,
-    "tau_fwhm_s": 30.0e-15,
+    "tau_fwhm_s": 5.0 * (0.8e-6 / C_LIGHT),  # 5 optical cycles at 0.8 um (~13.34 fs, Sec. V)
     "energy_gev": 1.0,
 }
 UNAL_TISAPPHIRE_LASER: dict[str, float] = {
