@@ -63,13 +63,36 @@ def test_power_conservation():
 
 def test_curl_b_matches_direct_b():
     # Cross-check: (i/omega) curl E must match the direct Debye B within grid error.
-    Ec, Bc, grid, _ = _compute_small()
+    Ec, Bc, grid = focus.focal_field_angular_spectrum(
+        lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER,
+        nx=32, ny=32, nz=32, span_xy_m=3.2e-6, span_y_m=3.2e-6,
+        ntheta=40, nphi=80,
+    )
     omega = C.omega_from_lambda(LAM)
     Bc_curl = focus.magnetic_field_from_curl(
         Ec[0], grid["dx_m"], grid["dy_m"], grid["dz_m"], omega
     )
     rel = float(np.linalg.norm(Bc_curl - Bc[0]) / np.linalg.norm(Bc[0]))
     assert rel < 0.15
+
+
+def test_global_phase_aligned_at_focus():
+    nx = ny = nz = 16
+    for far_field in (
+        focus.bi_dipole_far_field,
+        lambda n: focus.gaussian_far_field(n, f_number=F_NUMBER),
+    ):
+        Ec, Bc, _ = focus.focal_field_angular_spectrum(
+            lambda0_m=LAM, f_number=F_NUMBER, power_w=POWER,
+            nx=nx, ny=ny, nz=nz, span_xy_m=3.2e-6, span_y_m=3.2e-6,
+            ntheta=24, nphi=48, far_field=far_field,
+        )
+        ec_focus = Ec[0, 2, nz // 2, ny // 2, nx // 2]
+        bc_focus = Bc[0, 0, nz // 2, ny // 2, nx // 2]
+        assert ec_focus.real > 0.0
+        assert abs(ec_focus.imag) < 1e-9 * abs(ec_focus.real)
+        assert bc_focus.real < 0.0
+        assert abs(bc_focus.imag) < 1e-9 * abs(bc_focus.real)
 
 
 def test_a_max_close_to_expected():

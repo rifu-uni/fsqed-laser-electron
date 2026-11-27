@@ -97,6 +97,30 @@ def _centered_axis(span_m: float, npts: int) -> tuple[float, float]:
     return start, step
 
 
+def align_global_phase(
+    Ec: np.ndarray, Bc: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rotate ``(Ec, Bc)`` by a constant unit phase so peak ``E`` aligns with ``t = 0``.
+
+    Multiplying both phasors by a single unit scalar preserves Maxwell's
+    equations and all relative phases (including ``E``-``B`` and circular
+    polarization phase shifts) while enforcing synchronous peaking at ``t = 0``.
+    Expects ``(3, nz, ny, nx)`` complex arrays.
+    """
+    if Ec.ndim != 4 or Ec.shape[0] != 3 or Bc.shape != Ec.shape:
+        raise ValueError(
+            f"Expected Ec and Bc with matching shape (3, nz, ny, nx), got {Ec.shape} and {Bc.shape}"
+        )
+    e_norm = np.sqrt(np.sum(np.abs(Ec) ** 2, axis=0))
+    iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_norm)), e_norm.shape))
+    comp = int(np.argmax(np.abs(Ec[:, iz, iy, ix])))
+    ref = Ec[comp, iz, iy, ix]
+    if abs(ref) == 0.0:
+        return Ec, Bc
+    rot = np.conj(ref) / abs(ref)
+    return Ec * rot, Bc * rot
+
+
 def focal_field_angular_spectrum(
     *,
     lambda0_m: float,
@@ -208,6 +232,7 @@ def focal_field_angular_spectrum(
                 Ec[comp] += amp[i, j, comp] * phase
                 Bc[comp] += amp_B[i, j, comp] * phase
 
+    Ec, Bc = align_global_phase(Ec, Bc)
     grid = {
         "x0_m": float(x0), "dx_m": float(dx), "Nx": int(nx),
         "y0_m": float(y0), "dy_m": float(dy), "Ny": int(ny),
