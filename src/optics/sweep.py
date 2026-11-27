@@ -174,6 +174,17 @@ def kappa_eff_vs_f_number(
     return out
 
 
+def f_number_to_opening_angle_deg(f_number: float | np.ndarray) -> float | np.ndarray:
+    """Convert parabolic-mirror f-number ``L/(2 R_max)`` to opening angle (deg)."""
+    f_arr = np.asarray(f_number, dtype=np.float64)
+    if not np.all(np.isfinite(f_arr)) or np.any(f_arr <= 0.0):
+        raise ValueError("f_number must contain only finite positive values")
+    deg = np.degrees(2.0 * np.arctan(1.0 / (4.0 * f_arr)))
+    return float(deg) if np.ndim(f_number) == 0 else deg
+
+
 def default_f_number_sweep() -> np.ndarray:
-    """The f-number range used in Fig. 4 (0.25 .. 4, log-spaced)."""
-    return np.concatenate(([0.25], np.geomspace(0.35, 4.0, 12)))
+    """The f-number range matching Fig. 4 of Olofsson & Gonoskov (0.02 .. 2.0)."""
+    small_f = np.geomspace(0.02, 0.25, 10, endpoint=False)
+    mid_f = np.linspace(0.25, 2.0, 15)
+    return np.unique(np.concatenate((small_f, mid_f, [0.5, 1.0, 1.5, 2.0])))

@@ -1,10 +1,13 @@
-"""Genera imágenes para la presentación de la simulación óptica bi-dipolo.
+"""Generate presentation and comparison figures for the optics simulation.
 
-Usa Pillow (PIL) + numpy; no requiere matplotlib.  Ejecutar:
+Uses ``matplotlib`` (``Agg`` backend) and ``numpy``.  Run with:
 
-    python src/optics/presentation_plots.py
+    pixi run python src/optics/presentation_plots.py
 
-Genera archivos PNG en la carpeta ``images/``.
+Generates 7 PNG figures in ``images/``, including side-by-side comparisons of the
+ideal Sheppard-Larkin baseline (``bi_dipole_far_field``) against the realistic
+Gaussian + apodizer + parabolic-mirror pipeline across the PDF Fig. 4 f-number range
+(``0.02 .. 2.0``) for both the Paper FSQED laser and UNAL's Ti:Sapphire laser.
 """
 
 from __future__ import annotations
@@ -12,408 +15,421 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.optics import comparison  # noqa: E402
 from src.optics import constants as C  # noqa: E402
 from src.optics import focus  # noqa: E402
 from src.optics import sweep  # noqa: E402
 
-OUT = Path(__file__).resolve().parents[2] / "images"
-
-# --------------------------------------------------------------------------- #
-# Paleta de color (aproximación de "inferno", perceptualmente uniforme).
-# --------------------------------------------------------------------------- #
-INFERNO = [
-    (0.00, (0, 0, 4)),
-    (0.13, (28, 16, 68)),
-    (0.25, (79, 18, 123)),
-    (0.38, (135, 37, 129)),
-    (0.50, (189, 55, 99)),
-    (0.63, (232, 89, 63)),
-    (0.75, (250, 135, 40)),
-    (0.87, (252, 197, 47)),
-    (1.00, (252, 255, 164)),
-]
-VIRIDIS = [
-    (0.00, (68, 1, 84)),
-    (0.25, (59, 82, 139)),
-    (0.50, (33, 145, 140)),
-    (0.75, (94, 201, 98)),
-    (1.00, (253, 231, 37)),
-]
-
-
-def colorize(z: np.ndarray, cmap, vmin: float, vmax: float) -> np.ndarray:
-    """Map values in ``[vmin, vmax]`` to an (H, W, 3) uint8 RGB array."""
-    t = np.clip((z - vmin) / (vmax - vmin), 0.0, 1.0)
-    pos = np.array([p for p, _ in cmap])
-    cols = np.array([c for _, c in cmap], dtype=float)
-    idx = np.searchsorted(pos, t)
-    idx = np.clip(idx, 1, len(pos) - 1)
-    lo = pos[idx - 1]
-    hi = pos[idx]
-    c0 = cols[idx - 1]
-    c1 = cols[idx]
-    f = ((t - lo) / np.where(hi > lo, hi - lo, 1.0))[..., None]
-    rgb = c0 * (1.0 - f) + c1 * f
-    return rgb.astype(np.uint8)
-
-
-_BOLD_FONT_CANDIDATES = (
-    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "C:/Windows/Fonts/arialbd.ttf",
-    "C:/Windows/Fonts/segoeuib.ttf",
-)
-
-_REGULAR_FONT_CANDIDATES = (
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "C:/Windows/Fonts/segoeui.ttf",
-)
-
-
-def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Load a cross-platform TrueType font, falling back to Pillow's default."""
-    if size <= 0:
-        raise ValueError(f"Font size must be positive, got {size}")
-    candidates = (
-        (*_BOLD_FONT_CANDIDATES, *_REGULAR_FONT_CANDIDATES)
-        if bold
-        else _REGULAR_FONT_CANDIDATES
-    )
-    for font_path in candidates:
-        p = Path(font_path)
-        if not p.is_file():
-            continue
-        try:
-            return ImageFont.truetype(str(p), size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _nice_step(span: float, n: int = 5) -> float:
-    raw = span / n
-    if raw <= 0:
-        return 1.0
-    mag = 10 ** np.floor(np.log10(raw))
-    for m in (1.0, 2.0, 2.5, 5.0, 10.0):
-        if raw <= m * mag:
-            return m * mag
-    return 10.0 * mag
-
-
-def nice_ticks(lo: float, hi: float, n: int = 5) -> np.ndarray:
-    step = _nice_step(hi - lo, n)
-    start = np.ceil(lo / step) * step
-    return np.arange(start, hi + 1e-9 * step, step)
-
-
-def _fmt(v: float) -> str:
-    if abs(v) >= 1000 or (v != 0 and abs(v) < 0.01):
-        return f"{v:.1e}"
-    if abs(v - round(v)) < 1e-9:
-        return str(int(round(v)))
-    return f"{v:.2f}"
-
-
-def draw_heatmap(
-    path: Path,
-    z: np.ndarray,
-    x_extent,
-    y_extent,
-    title: str,
-    xlabel: str,
-    ylabel: str,
-    clabel: str,
-    vmin: float,
-    vmax: float,
-    cmap=INFERNO,
-    size=(1500, 1100),
-) -> None:
-    """Render a labelled 2-D heatmap (z[0, :] at y_extent[0]) to a PNG."""
-    W, H = size
-    img = Image.new("RGB", (W, H), "white")
-    d = ImageDraw.Draw(img)
-    f_title = _font(44, bold=True)
-    f_axis = _font(34)
-    f_tick = _font(26)
-    f_cb = _font(30)
-
-    d.text((W // 2, 46), title, font=f_title, fill="black", anchor="ma")
-
-    m_left, m_top, m_bottom = 130, 130, 150
-    cb_w, cb_gap = 46, 40
-    plot_right = W - 190 - cb_w - cb_gap
-    plot_w = plot_right - m_left
-    plot_h = H - m_top - m_bottom
-
-    rgb = colorize(z[::-1, :], cmap, vmin, vmax)  # flip so y_extent[1] is on top
-    im = Image.fromarray(rgb).resize((plot_w, plot_h), Image.BILINEAR)
-    img.paste(im, (m_left, m_top))
-
-    # Colorbar (top = vmax).
-    grad = np.linspace(1.0, 0.0, plot_h)[:, None]
-    gb = np.repeat(colorize(grad, cmap, 0.0, 1.0), cb_w // 2, axis=1)
-    cb_x = plot_right + cb_gap
-    img.paste(Image.fromarray(gb).resize((cb_w // 2, plot_h)), (cb_x, m_top))
-    d.rectangle([cb_x, m_top, cb_x + cb_w // 2 - 1, m_top + plot_h - 1], outline="black")
-    for i in range(6):
-        val = vmax - (vmax - vmin) * i / 5
-        yp = m_top + plot_h * i / 5
-        d.line([cb_x + cb_w // 2 - 1, yp, cb_x + cb_w // 2 + 6, yp], fill="black", width=2)
-        d.text((cb_x + cb_w // 2 + 12, yp), _fmt(val), font=f_cb, fill="black", anchor="lm")
-    d.text((cb_x + cb_w // 4, m_top + plot_h + 18), clabel, font=f_tick, fill="black", anchor="ma")
-
-    # Plot border.
-    d.rectangle([m_left, m_top, m_left + plot_w - 1, m_top + plot_h - 1], outline="black")
-
-    # X ticks.
-    x0, x1 = x_extent
-    for t in nice_ticks(x0, x1, 5):
-        xp = m_left + (t - x0) / (x1 - x0) * (plot_w - 1)
-        d.line([xp, m_top + plot_h - 1, xp, m_top + plot_h + 8], fill="black", width=2)
-        d.text((xp, m_top + plot_h + 16), _fmt(t), font=f_tick, fill="black", anchor="ma")
-    d.text((m_left + plot_w / 2, m_top + plot_h + 58), xlabel, font=f_axis, fill="black", anchor="ma")
-
-    # Y ticks.
-    y0, y1 = y_extent
-    for t in nice_ticks(y0, y1, 5):
-        yp = m_top + (1 - (t - y0) / (y1 - y0)) * (plot_h - 1)
-        d.line([m_left - 8, yp, m_left - 1, yp], fill="black", width=2)
-        d.text((m_left - 14, yp), _fmt(t), font=f_tick, fill="black", anchor="rm")
-    d.text((m_left - 78, m_top + plot_h / 2), ylabel, font=f_axis, fill="black", anchor="mm")
-
-    img.save(path)
-
-
-def draw_line_plot(
-    path: Path,
-    series,
-    title: str,
-    xlabel: str,
-    ylabel: str,
-    xlog: bool = False,
-    hlines=None,
-    x_extent=None,
-    y_extent=None,
-    size=(1500, 1100),
-) -> None:
-    """Render a labelled line plot (one or several series) to a PNG."""
-    W, H = size
-    img = Image.new("RGB", (W, H), "white")
-    d = ImageDraw.Draw(img)
-    f_title = _font(44, bold=True)
-    f_axis = _font(34)
-    f_tick = _font(26)
-    f_legend = _font(28)
-
-    d.text((W // 2, 46), title, font=f_title, fill="black", anchor="ma")
-
-    m_left, m_top, m_bottom, m_right = 140, 120, 150, 100
-    plot_w = W - m_left - m_right
-    plot_h = H - m_top - m_bottom
-
-    allx = np.concatenate([np.atleast_1d(s["x"]) for s in series])
-    ally = np.concatenate(
-        [np.atleast_1d(s["y"]) for s in series]
-        + [np.atleast_1d(h["y"]) for h in (hlines or [])]
-    )
-    if x_extent is None:
-        x0, x1 = float(allx.min()), float(allx.max())
-        if x0 == x1:
-            x0, x1 = x0 - 1, x1 + 1
-    else:
-        x0, x1 = x_extent
-    if y_extent is None:
-        y0, y1 = float(ally.min()), float(ally.max())
-        pad = (y1 - y0) * 0.08 or 1.0
-        y0, y1 = y0 - pad, y1 + pad
-    else:
-        y0, y1 = y_extent
-
-    def X(v):
-        if xlog:
-            return m_left + (np.log10(v) - np.log10(x0)) / (np.log10(x1) - np.log10(x0)) * (plot_w - 1)
-        return m_left + (v - x0) / (x1 - x0) * (plot_w - 1)
-
-    def Y(v):
-        return m_top + (1 - (v - y0) / (y1 - y0)) * (plot_h - 1)
-
-    if xlog:
-        xticks = np.geomspace(x0, x1, 8)
-    else:
-        xticks = nice_ticks(x0, x1, 6)
-    for t in xticks:
-        if x0 <= t <= x1 + 1e-12:
-            xp = X(t)
-            d.line([xp, m_top, xp, m_top + plot_h - 1], fill=(232, 232, 232), width=1)
-            d.line([xp, m_top + plot_h - 1, xp, m_top + plot_h + 8], fill="black", width=2)
-            d.text((xp, m_top + plot_h + 16), _fmt(t), font=f_tick, fill="black", anchor="ma")
-    for t in nice_ticks(y0, y1, 6):
-        yp = Y(t)
-        d.line([m_left, yp, m_left + plot_w - 1, yp], fill=(232, 232, 232), width=1)
-        d.line([m_left - 8, yp, m_left - 1, yp], fill="black", width=2)
-        d.text((m_left - 14, yp), _fmt(t), font=f_tick, fill="black", anchor="rm")
-
-    d.rectangle([m_left, m_top, m_left + plot_w - 1, m_top + plot_h - 1], outline="black")
-
-    for h in (hlines or []):
-        yp = Y(h["y"])
-        d.line([m_left, yp, m_left + plot_w - 1, yp], fill=h.get("color", "gray"), width=2)
-        if h.get("label"):
-            d.text((m_left + 8, yp - 30), h["label"], font=f_legend, fill=h.get("color", "gray"), anchor="lm")
-
-    for s in series:
-        color = s.get("color", "black")
-        pts = [(X(float(xv)), Y(float(yv))) for xv, yv in zip(s["x"], s["y"])]
-        d.line(pts, fill=color, width=s.get("width", 4))
-
-    ly = m_top + 14
-    for s in series:
-        color = s.get("color", "black")
-        d.line([m_left + 14, ly, m_left + 44, ly], fill=color, width=4)
-        d.text((m_left + 52, ly), s.get("label", ""), font=f_legend, fill="black", anchor="lm")
-        ly += 38
-
-    d.text((m_left + plot_w / 2, m_top + plot_h + 60), xlabel, font=f_axis, fill="black", anchor="ma")
-    d.text((m_left - 80, m_top + plot_h / 2), ylabel, font=f_axis, fill="black", anchor="mm")
-
-    img.save(path)
-
-
-# --------------------------------------------------------------------------- #
-# Datos y generación de cada imagen.
-# --------------------------------------------------------------------------- #
-LAM = 0.8e-6
-FN = 0.25
-POWER = 1.0e15
+OUT = REPO_ROOT / "images"
 UM = 1.0e6
+FN_REF = 0.25
+W0_OVER_RMAX = 0.7
+APOD_ORDER = 8.0
 
 
-def _compute_slices():
+def _field_intensity_slices(
+    *,
+    lambda0_m: float,
+    power_w: float,
+    far_field,
+    f_number: float = FN_REF,
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Compute focal (y=0) and convergence (x=0) |E|^2 slices for a given far-field."""
     Ec_xz, ax_x, ax_z, _ = focus.focal_field_slice(
-        plane="y", coord_m=0.0, lambda0_m=LAM, f_number=FN, power_w=POWER,
-        n1=300, n2=300, span1_m=3.0e-6, span2_m=3.0e-6, ntheta=48, nphi=96,
+        plane="y",
+        coord_m=0.0,
+        lambda0_m=lambda0_m,
+        f_number=f_number,
+        power_w=power_w,
+        n1=240,
+        n2=240,
+        span1_m=3.0e-6,
+        span2_m=3.0e-6,
+        ntheta=48,
+        nphi=96,
+        far_field=far_field,
     )
-    I_xz = np.abs(Ec_xz[0]) ** 2 + np.abs(Ec_xz[1]) ** 2 + np.abs(Ec_xz[2]) ** 2
+    I_xz = np.sum(np.abs(Ec_xz) ** 2, axis=0)
+
     Ec_yz, ax_z2, ax_y, _ = focus.focal_field_slice(
-        plane="x", coord_m=0.0, lambda0_m=LAM, f_number=FN, power_w=POWER,
-        n1=300, n2=300, span1_m=3.0e-6, span2_m=6.0e-6, ntheta=48, nphi=96,
+        plane="x",
+        coord_m=0.0,
+        lambda0_m=lambda0_m,
+        f_number=f_number,
+        power_w=power_w,
+        n1=240,
+        n2=240,
+        span1_m=3.0e-6,
+        span2_m=6.0e-6,
+        ntheta=48,
+        nphi=96,
+        far_field=far_field,
     )
-    I_yz = np.abs(Ec_yz[0]) ** 2 + np.abs(Ec_yz[1]) ** 2 + np.abs(Ec_yz[2]) ** 2
+    I_yz = np.sum(np.abs(Ec_yz) ** 2, axis=0)
     return (I_xz, ax_x, ax_z), (I_yz, ax_z2, ax_y)
 
 
-def image_focal_intensity(out: Path, slices) -> None:
-    (I_xz, ax_x, ax_z), _ = slices
-    logI = np.log10(I_xz + 1e-30)
-    vmax = float(logI.max())
-    draw_heatmap(
-        out, logI,
-        x_extent=(ax_x[0] * UM, ax_x[-1] * UM), y_extent=(ax_z[0] * UM, ax_z[-1] * UM),
-        title="Campo focal |E|² (plano y = 0)",
-        xlabel="x (µm)", ylabel="z (µm)", clabel="log₁₀|E|²",
-        vmin=vmax - 6.0, vmax=vmax,
-    )
+def _add_opening_angle_top_axis(ax: plt.Axes) -> plt.Axes:
+    """Attach a secondary top x-axis with Fig. 4 opening-angle tick marks."""
+    angles_deg = [170, 120, 80, 50, 30, 20, 15]
+    f_positions = [1.0 / (4.0 * np.tan(np.radians(a) / 2.0)) for a in angles_deg]
+    ax_top = ax.twiny()
+    ax_top.set_xlim(ax.get_xlim())
+    ax_top.set_xticks(f_positions)
+    ax_top.set_xticklabels([f"{a}°" for a in angles_deg], fontsize=9)
+    ax_top.set_xlabel("opening angle $\\zeta$", fontsize=10, labelpad=6)
+    return ax_top
 
 
-def image_convergence(out: Path, slices) -> None:
-    _, (I_yz, ax_z2, ax_y) = slices
-    logI = np.log10(I_yz + 1e-30)
-    vmax = float(logI.max())
-    draw_heatmap(
-        out, logI,
-        x_extent=(ax_z2[0] * UM, ax_z2[-1] * UM), y_extent=(ax_y[0] * UM, ax_y[-1] * UM),
-        title="Convergencia del haz (plano x = 0)",
-        xlabel="z (µm)", ylabel="y (µm)", clabel="log₁₀|E|²",
-        vmin=vmax - 6.0, vmax=vmax,
-    )
+def _add_field_right_axis(
+    ax: plt.Axes,
+    *,
+    energy_gev: float,
+    scale_exponent: float,
+    ylabel: str,
+) -> plt.Axes:
+    """Attach a right y-axis converting chi_max (at 1 GeV) to peak |E|."""
+    gamma = C.energy_gev_to_gamma(energy_gev)
+    chi_to_e = C.E_CRIT / (2.0 * gamma) / (10.0 ** scale_exponent)
+    ax_right = ax.twinx()
+    y0, y1 = ax.get_ylim()
+    ax_right.set_ylim(y0 * chi_to_e, y1 * chi_to_e)
+    ax_right.set_ylabel(ylabel, fontsize=10)
+    return ax_right
 
 
-def image_profile(out: Path, slices) -> None:
-    (I_xz, ax_x, _), (I_yz, _, ax_y) = slices
-    ex = np.sqrt(I_xz[I_xz.shape[0] // 2, :])        # |E(x, 0, 0)|
-    ey = np.sqrt(I_yz[:, I_yz.shape[1] // 2])        # |E(0, y, 0)|
-    draw_line_plot(
-        out,
-        [
-            {"x": ax_x * UM, "y": ex, "label": "|E| vs x (transversal)", "color": (200, 30, 40)},
-            {"x": ax_y * UM, "y": ey, "label": "|E| vs y (longitudinal)", "color": (30, 80, 200)},
-        ],
-        title="Perfil del campo en el foco",
-        xlabel="posición (µm)", ylabel="|E| (V/m)",
-    )
-
-
-def image_kappa_sweep(out):
-    fns = np.concatenate(([0.25], np.geomspace(0.35, 4.0, 12)))
+def _run_fig4_sweeps(
+    fns: np.ndarray,
+    *,
+    lambda0_m: float,
+    power_w: float,
+    energy_gev: float,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Run ideal, lossless-gaussian, and lossy-gaussian f-number sweeps."""
+    t_total = sweep.gaussian_transmission(W0_OVER_RMAX, APOD_ORDER)
     ideal = sweep.kappa_eff_vs_f_number(
-        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0, ntheta=128, nphi=256,
+        fns,
+        lambda0_m=lambda0_m,
+        power_w=power_w,
+        energy_gev=energy_gev,
+        far_field_builder=sweep.ideal_far_field_builder(),
+        ntheta=192,
+        nphi=256,
     )
-    gauss = sweep.kappa_eff_vs_f_number(
-        fns, lambda0_m=1.0e-6, power_w=POWER, energy_gev=1.0,
-        far_field_builder=sweep.gaussian_far_field_builder(), ntheta=128, nphi=256,
+    gauss_focal = sweep.kappa_eff_vs_f_number(
+        fns,
+        lambda0_m=lambda0_m,
+        power_w=power_w,
+        energy_gev=energy_gev,
+        far_field_builder=sweep.gaussian_far_field_builder(W0_OVER_RMAX, APOD_ORDER),
+        power_transmission=1.0,
+        ntheta=192,
+        nphi=256,
     )
-    f = np.array([r['f_number'] for r in ideal])
-    chi_i = np.array([r['chi_max_per_GeV'] for r in ideal])
-    chi_g = np.array([r['chi_max_per_GeV'] for r in gauss])
-    draw_line_plot(
-        out,
-        [
-            {'x': f, 'y': chi_i, 'label': 'ideal (Sheppard-Larkin)', 'color': (30, 80, 200)},
-            {'x': f, 'y': chi_g, 'label': 'realista (gaussiano + espejo)', 'color': (200, 30, 40)},
-        ],
-        title='chi_max vs f-number: ideal vs realista',
-        xlabel='f-number  L/(2 R_max)', ylabel='chi_max por GeV',
-        xlog=True,
-        hlines=[{'y': 5.25, 'color': (180, 30, 30), 'label': 'limite bi-dipolo k = 5.25'}],
+    gauss_loss = sweep.kappa_eff_vs_f_number(
+        fns,
+        lambda0_m=lambda0_m,
+        power_w=power_w,
+        energy_gev=energy_gev,
+        far_field_builder=sweep.gaussian_far_field_builder(W0_OVER_RMAX, APOD_ORDER),
+        power_transmission=t_total,
+        ntheta=192,
+        nphi=256,
     )
+    return ideal, gauss_focal, gauss_loss
+
+
+def image_focal_intensity(out: Path, ideal_slices, gauss_slices) -> None:
+    """01: Side-by-side focal plane (y = 0) |E|^2 comparison."""
+    (I_id, ax_x, ax_z), _ = ideal_slices
+    (I_ga, _, _), _ = gauss_slices
+    log_id = np.log10(I_id + 1e-30)
+    log_ga = np.log10(I_ga + 1e-30)
+    vmax = float(max(log_id.max(), log_ga.max()))
+    vmin = vmax - 6.0
+    extent = [ax_x[0] * UM, ax_x[-1] * UM, ax_z[0] * UM, ax_z[-1] * UM]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), constrained_layout=True)
+    for ax, arr, subtitle in (
+        (axes[0], log_id, "Ideal (Sheppard-Larkin)"),
+        (axes[1], log_ga, f"Realista Gaussiano ($w_0/R_{{\\max}}={W0_OVER_RMAX}$, $m={APOD_ORDER:.0f}$)"),
+    ):
+        im = ax.imshow(arr, origin="lower", extent=extent, cmap="inferno", vmin=vmin, vmax=vmax, aspect="equal")
+        ax.set_title(subtitle, fontsize=11)
+        ax.set_xlabel("x (µm)")
+        ax.set_ylabel("z (µm)")
+    cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
+    cbar.set_label(r"$\log_{10} |E|^2\ (\mathrm{V^2/m^2})$")
+    fig.suptitle(r"Campo focal $|E|^2$ en el plano $y=0$ ($P=1\,\mathrm{PW}$, $\lambda=0.8\,\mu\mathrm{m}$, $f=0.25$)", fontsize=12, fontweight="bold")
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
+
+def image_convergence(out: Path, ideal_slices, gauss_slices) -> None:
+    """02: Side-by-side convergence plane (x = 0) |E|^2 comparison."""
+    _, (I_id, ax_z, ax_y) = ideal_slices
+    _, (I_ga, _, _) = gauss_slices
+    log_id = np.log10(I_id + 1e-30)
+    log_ga = np.log10(I_ga + 1e-30)
+    vmax = float(max(log_id.max(), log_ga.max()))
+    vmin = vmax - 6.0
+    extent = [ax_z[0] * UM, ax_z[-1] * UM, ax_y[0] * UM, ax_y[-1] * UM]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), constrained_layout=True)
+    for ax, arr, subtitle in (
+        (axes[0], log_id, "Ideal (Sheppard-Larkin)"),
+        (axes[1], log_ga, f"Realista Gaussiano ($w_0/R_{{\\max}}={W0_OVER_RMAX}$, $m={APOD_ORDER:.0f}$)"),
+    ):
+        im = ax.imshow(arr, origin="lower", extent=extent, cmap="inferno", vmin=vmin, vmax=vmax, aspect="auto")
+        ax.set_title(subtitle, fontsize=11)
+        ax.set_xlabel("z (µm)")
+        ax.set_ylabel("y (µm)")
+    cbar = fig.colorbar(im, ax=axes, shrink=0.92, pad=0.02)
+    cbar.set_label(r"$\log_{10} |E|^2\ (\mathrm{V^2/m^2})$")
+    fig.suptitle(r"Convergencia del haz en el plano $x=0$ ($P=1\,\mathrm{PW}$, $\lambda=0.8\,\mu\mathrm{m}$, $f=0.25$)", fontsize=12, fontweight="bold")
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
+
+def image_profile(out: Path, ideal_slices, gauss_slices) -> None:
+    """03: Focal field cross-sections |E(x,0,0)| and |E(0,y,0)| for Paper & UNAL lasers."""
+    (I_id_xz, ax_x, _), (I_id_yz, _, ax_y) = ideal_slices
+    (I_ga_xz, _, _), (I_ga_yz, _, _) = gauss_slices
+
+    # UNAL fields scale by sqrt(P_unal / P_paper) at the same wavelength and f-number.
+    unal_field_scale = np.sqrt(C.UNAL_TISAPPHIRE_LASER["power_w"] / C.PAPER_FSQED_LASER["power_w"])
+    t_total = sweep.gaussian_transmission(W0_OVER_RMAX, APOD_ORDER)
+    loss_field_scale = np.sqrt(t_total)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.2, 4.8), constrained_layout=True)
+    configs = [
+        (axes[0], 1.0, 1e14, "Paper FSQED (1 PW, 0.8 µm, 30 fs)", r"$|E|\ (10^{14}\ \mathrm{V/m})$"),
+        (axes[1], unal_field_scale, 1e9, "UNAL Ti:Sapphire (13 kW, 0.8 µm, 170 fs)", r"$|E|\ (10^{9}\ \mathrm{V/m})$"),
+    ]
+    for ax, fscale, norm, title, ylabel in configs:
+        ex_id = np.sqrt(I_id_xz[I_id_xz.shape[0] // 2, :]) * fscale / norm
+        ey_id = np.sqrt(I_id_yz[:, I_id_yz.shape[1] // 2]) * fscale / norm
+        ex_ga = np.sqrt(I_ga_xz[I_ga_xz.shape[0] // 2, :]) * fscale * loss_field_scale / norm
+        ey_ga = np.sqrt(I_ga_yz[:, I_ga_yz.shape[1] // 2]) * fscale * loss_field_scale / norm
+
+        ax.plot(ax_x * UM, ex_id, color="C0", lw=2.0, label="Ideal vs x (transversal)")
+        ax.plot(ax_y * UM, ey_id, color="C0", lw=1.6, ls="--", label="Ideal vs y (longitudinal)")
+        ax.plot(ax_x * UM, ex_ga, color="C3", lw=2.0, label="Gaussiano + T vs x")
+        ax.plot(ax_y * UM, ey_ga, color="C3", lw=1.6, ls="--", label="Gaussiano + T vs y")
+        ax.set_xlim(-1.5, 1.5)
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("posición (µm)")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8.5, loc="upper right")
+    fig.suptitle("Perfil espacial del campo eléctrico en el foco ($f = 0.25$): Paper vs. UNAL", fontsize=12, fontweight="bold")
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
+
+def image_kappa_sweep(out: Path) -> None:
+    """04: Reproduction of PDF Fig. 4 across f-number in [0.02, 2.0]."""
+    fns = sweep.default_f_number_sweep()
+    ideal, gauss_focal, gauss_loss = _run_fig4_sweeps(fns, **C.PAPER_FIG4_LASER)
+    f = np.array([r["f_number"] for r in ideal])
+    chi_id = np.array([r["chi_max_per_GeV"] for r in ideal])
+    chi_gf = np.array([r["chi_max_per_GeV"] for r in gauss_focal])
+    chi_gl = np.array([r["chi_max_per_GeV"] for r in gauss_loss])
+    t_total = gauss_loss[0]["transmission"]
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.4), constrained_layout=True)
+    ax.plot(f, chi_id, "o-", color="C0", ms=4, lw=2.0, label="Ideal (Sheppard-Larkin)")
+    ax.plot(f, chi_gf, "--", color="C1", lw=1.8, label="Gaussiano realista (potencia en foco)")
+    ax.plot(f, chi_gl, "s-", color="C3", ms=3.8, lw=2.0, label=f"Gaussiano realista (con pérdida $T={t_total:.3f}$)")
+    ax.axhline(C.KAPPA_BIDIPOLE_MAX, color="0.35", ls=":", lw=1.4, label=r"Límite bi-dipolo $\kappa_{\max} = 5.25$")
+
+    ax.set_xlim(0.0, 2.0)
+    ax.set_ylim(0.0, 5.8)
+    ax.set_xlabel("f-number  $L / (2 R_{\\max})$", fontsize=11)
+    ax.set_ylabel(r"$\chi_{\max}$ (o $\kappa_{\mathrm{eff}}$ para $1\ \mathrm{PW}, 1\ \mu\mathrm{m}, 1\ \mathrm{GeV}$)", fontsize=11)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower left", fontsize=9)
+    _add_opening_angle_top_axis(ax)
+    _add_field_right_axis(
+        ax,
+        energy_gev=C.PAPER_FIG4_LASER["energy_gev"],
+        scale_exponent=14,
+        ylabel=r"field strength ($10^{14}\ \mathrm{V/m}$)",
+    )
+    ax.set_title("Reproducción Fig. 4: $\\chi_{\\max}$ vs. f-number (ideal vs. gaussiano realista)", fontsize=11.5, fontweight="bold", pad=10)
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
 
 def image_farfield(out: Path) -> None:
-    th = np.linspace(0.0, np.pi / 2, 300)
-    ph = np.linspace(0.0, 2 * np.pi, 96, endpoint=False)
+    """05: Azimuthally averaged far-field angular distribution at f = 0.25."""
+    th = np.linspace(0.0, np.pi / 2.0, 300)
+    ph = np.linspace(0.0, 2.0 * np.pi, 96, endpoint=False)
     TH, PH = np.meshgrid(th, ph, indexing="ij")
     n = np.stack([np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1)
-    E = focus.bi_dipole_far_field(n)
-    I = np.mean(np.sum(np.abs(E) ** 2, axis=-1), axis=1)  # promedio azimutal
-    draw_line_plot(
-        out,
-        [{"x": th * 180.0 / np.pi, "y": I, "label": "|E_ff|² (promedio azimutal)", "color": (30, 80, 200)}],
-        title="Distribución angular del campo lejano (bi-dipolo)",
-        xlabel="θ desde el eje −y (grados)", ylabel="|E_ff|² (u. a.)",
+
+    E_id = focus.bi_dipole_far_field(n)
+    E_ga = focus.gaussian_far_field(n, f_number=FN_REF, w0_over_rmax=W0_OVER_RMAX, apod_order=APOD_ORDER)
+    I_id = np.mean(np.sum(np.abs(E_id) ** 2, axis=-1), axis=1)
+    I_ga = np.mean(np.sum(np.abs(E_ga) ** 2, axis=-1), axis=1)
+    I_id /= I_id[0]
+    I_ga /= I_ga[0]
+
+    th_deg = np.degrees(th)
+    fig, ax = plt.subplots(figsize=(7.8, 4.8), constrained_layout=True)
+    ax.plot(th_deg, I_id, color="C0", lw=2.2, label="Ideal (Sheppard-Larkin)")
+    ax.plot(th_deg, I_ga, color="C3", lw=2.2, label=f"Gaussiano + espejo ($w_0/R_{{\\max}}={W0_OVER_RMAX}$, $m={APOD_ORDER:.0f}$)")
+    ax.set_xlim(0.0, 90.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel(r"$\theta$ desde el eje $-\hat{y}$ (grados)", fontsize=11)
+    ax.set_ylabel(r"$\langle |E_{\mathrm{ff}}(\theta)|^2 \rangle_\phi$ normalizado", fontsize=11)
+    ax.set_title("Distribución angular del campo lejano tras el espejo parabólico ($f = 0.25$)", fontsize=11.5, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9.5)
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
+
+def image_incident_profile(out: Path) -> None:
+    """06: Radial incident intensity profile I^p(R) (Eq. 13) vs Gaussian x apodizer."""
+    R, I_id, I_ga = comparison.incident_intensity_profiles(
+        f_number=FN_REF, w0_over_rmax=W0_OVER_RMAX, apod_order=APOD_ORDER, nr=512
     )
+    metrics = comparison.summarize_degradation(
+        f_number=FN_REF, w0_over_rmax=W0_OVER_RMAX, apod_order=APOD_ORDER, nr=512
+    )
+    I_id_n = I_id / I_id[0]
+    I_ga_n = I_ga / I_ga[0]
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.8), constrained_layout=True)
+    ax.plot(R, I_id_n, color="C0", lw=2.3, label=r"Ideal Ec. (13): $[(R/2L)^2 + 1]^{-4}$")
+    ax.plot(R, I_ga_n, color="C3", lw=2.3, ls="--", label=f"Gaussiano $\\times$ apodizador ($w_0/R_{{\\max}}={W0_OVER_RMAX}$, $m={APOD_ORDER:.0f}$)")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel(r"Radio normalizado $r = R / R_{\max}$", fontsize=11)
+    ax.set_ylabel(r"Intensidad incidente $I^p(r) / I^p(0)$", fontsize=11)
+    ax.set_title("Perfil radial incidente antes del espejo parabólico ($f = 0.25$)", fontsize=11.5, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower left", fontsize=9.5)
+
+    note = (
+        f"Métricas ponderadas por área ($R\\,dR$):\n"
+        f"RMSE = {metrics['rmse']:.4f}   (MSE = {metrics['mse']:.4f})\n"
+        f"Correlación r = {metrics['correlation']:.6f}\n"
+        f"T_apodizador = {metrics['transmission']:.4f}\n"
+        f"T_total = {metrics['total_transmission']:.4f}"
+    )
+    ax.text(
+        0.97, 0.96, note,
+        transform=ax.transAxes, ha="right", va="top", fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.45", facecolor="white", edgecolor="0.7", alpha=0.92),
+    )
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
+
+def image_unal_vs_paper_comparison(out: Path) -> None:
+    """07: Paper FSQED vs UNAL Ti:Sapphire sweep across Fig. 4 range (0.02 .. 2.0)."""
+    fns = sweep.default_f_number_sweep()
+    paper_id, paper_gf, paper_gl = _run_fig4_sweeps(
+        fns,
+        lambda0_m=C.PAPER_FSQED_LASER["lambda0_m"],
+        power_w=C.PAPER_FSQED_LASER["power_w"],
+        energy_gev=C.PAPER_FSQED_LASER["energy_gev"],
+    )
+    unal_id, unal_gf, unal_gl = _run_fig4_sweeps(
+        fns,
+        lambda0_m=C.UNAL_TISAPPHIRE_LASER["lambda0_m"],
+        power_w=C.UNAL_TISAPPHIRE_LASER["power_w"],
+        energy_gev=C.UNAL_TISAPPHIRE_LASER["energy_gev"],
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.4), constrained_layout=True)
+    panels = [
+        (
+            axes[0],
+            paper_id, paper_gf, paper_gl,
+            1.0, 14,
+            "Paper FSQED ($1\\ \\mathrm{PW},\\ 0.8\\ \\mu\\mathrm{m},\\ 30\\ \\mathrm{fs}$)",
+            r"$\chi_{\max}\ /\ \mathrm{GeV}$",
+            r"$|E_{\max}|\ (10^{14}\ \mathrm{V/m})$",
+        ),
+        (
+            axes[1],
+            unal_id, unal_gf, unal_gl,
+            1.0e5, 9,
+            "UNAL Ti:Sapphire ($13\\ \\mathrm{kW},\\ 0.8\\ \\mu\\mathrm{m},\\ 170\\ \\mathrm{fs}$)",
+            r"$\chi_{\max}\ /\ \mathrm{GeV}\ (\times 10^{-5})$",
+            r"$|E_{\max}|\ (10^{9}\ \mathrm{V/m})$",
+        ),
+    ]
+    for ax, r_id, r_gf, r_gl, yscale, exp_e, title, ylabel, rylabel in panels:
+        f = np.array([r["f_number"] for r in r_id])
+        y_id = np.array([r["chi_max_per_GeV"] for r in r_id]) * yscale
+        y_gf = np.array([r["chi_max_per_GeV"] for r in r_gf]) * yscale
+        y_gl = np.array([r["chi_max_per_GeV"] for r in r_gl]) * yscale
+
+        ax.plot(f, y_id, "o-", color="C0", ms=3.5, lw=2.0, label="Ideal (Sheppard-Larkin)")
+        ax.plot(f, y_gf, "--", color="C1", lw=1.8, label="Gaussiano (en foco)")
+        ax.plot(f, y_gl, "s-", color="C3", ms=3.5, lw=2.0, label="Gaussiano (con pérdida $T$)")
+        ax.set_xlim(0.0, 2.0)
+        ax.set_ylim(0.0, float(y_id.max()) * 1.12)
+        ax.set_xlabel("f-number  $L / (2 R_{\\max})$", fontsize=10.5)
+        ax.set_ylabel(ylabel, fontsize=10.5)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="lower left", fontsize=8.5)
+        _add_opening_angle_top_axis(ax)
+
+        # Right axis in physical V/m units matching yscale.
+        gamma = C.energy_gev_to_gamma(1.0)
+        chi_to_e = C.E_CRIT / (2.0 * gamma) / yscale / (10.0 ** exp_e)
+        ax_r = ax.twinx()
+        y0, y1 = ax.get_ylim()
+        ax_r.set_ylim(y0 * chi_to_e, y1 * chi_to_e)
+        ax_r.set_ylabel(rylabel, fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+
+    fig.suptitle("Comparación Sheppard-Larkin vs. Gaussiano realista: Paper vs. Láser UNAL", fontsize=12.5, fontweight="bold")
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    print("Calculando cortes del campo focal...")
-    slices = _compute_slices()
+    lam = C.PAPER_FSQED_LASER["lambda0_m"]
+    pwr = C.PAPER_FSQED_LASER["power_w"]
+    print("Calculando cortes del campo focal (ideal y gaussiano)...")
+    ideal_slices = _field_intensity_slices(lambda0_m=lam, power_w=pwr, far_field=focus.bi_dipole_far_field)
+    gauss_slices = _field_intensity_slices(
+        lambda0_m=lam,
+        power_w=pwr,
+        far_field=lambda n: focus.gaussian_far_field(n, f_number=FN_REF, w0_over_rmax=W0_OVER_RMAX, apod_order=APOD_ORDER),
+    )
+
     jobs = [
-        (OUT / "01_campo_focal_xz.png", image_focal_intensity, slices),
-        (OUT / "02_convergencia_yz.png", image_convergence, slices),
-        (OUT / "03_perfil_campo.png", image_profile, slices),
-        (OUT / "04_chi_vs_fnumber.png", image_kappa_sweep, None),
-        (OUT / "05_patron_angular.png", image_farfield, None),
+        (OUT / "01_campo_focal_xz.png", lambda p: image_focal_intensity(p, ideal_slices, gauss_slices)),
+        (OUT / "02_convergencia_yz.png", lambda p: image_convergence(p, ideal_slices, gauss_slices)),
+        (OUT / "03_perfil_campo.png", lambda p: image_profile(p, ideal_slices, gauss_slices)),
+        (OUT / "04_chi_vs_fnumber.png", image_kappa_sweep),
+        (OUT / "05_patron_angular.png", image_farfield),
+        (OUT / "06_perfil_incidente_eq13.png", image_incident_profile),
+        (OUT / "07_unal_vs_paper_comparison.png", image_unal_vs_paper_comparison),
     ]
-    for path, fn, arg in jobs:
+    for path, fn in jobs:
         print(f"Generando {path.name} ...")
-        if arg is None:
-            fn(path)
-        else:
-            fn(path, arg)
+        fn(path)
     print(f"\nListo. {len(jobs)} imágenes en {OUT.resolve()}")
 
 
 if __name__ == "__main__":
     main()
-
-

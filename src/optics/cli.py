@@ -33,12 +33,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def default_parameters() -> dict:
     """Return the default parameter set (FSQED laser, realistic optical pipeline)."""
     return {
-        "lambda0_m": 0.8e-6,          # Ti:Sapphire, 800 nm
+        "lambda0_m": C.PAPER_FSQED_LASER["lambda0_m"],
         "f_number": 0.25,             # full -y hemisphere (opening angle 90 deg)
-        "power_w": 1.0e15,            # 1 PW peak power
+        "power_w": C.PAPER_FSQED_LASER["power_w"],
         "pol": "z-linear",
-        "tau_fwhm_s": 30.0e-15,       # 30 fs pulse (FWHM intensity), FSQED regime
-        "energy_gev": 1.0,
+        "tau_fwhm_s": C.PAPER_FSQED_LASER["tau_fwhm_s"],
+        "energy_gev": C.PAPER_FSQED_LASER["energy_gev"],
         "mode": "gaussian",           # realistic optical pipeline
         "w0_over_rmax": 0.7,          # Gaussian waist / mirror radius
         "apod_order": 8.0,            # super-Gaussian apodizer order
@@ -50,6 +50,19 @@ def default_parameters() -> dict:
         "focal_length_m": None,
         "account_for_losses": False,
     }
+
+
+def preset_parameters(preset: str = "paper") -> dict:
+    """Return a parameter dict initialized for the named laser preset ('paper' or 'unal')."""
+    presets = {
+        "paper": C.PAPER_FSQED_LASER,
+        "unal": C.UNAL_TISAPPHIRE_LASER,
+    }
+    if preset not in presets:
+        raise ValueError(f"Unknown preset {preset!r}; expected one of {sorted(presets)}")
+    params = default_parameters()
+    params.update(presets[preset])
+    return params
 
 
 def build_far_field(params: dict):
@@ -141,19 +154,25 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Bi-dipole optical simulation (Olofsson & Gonoskov, PRA 106, 063512)."
     )
+    parser.add_argument(
+        "--preset",
+        choices=["paper", "unal"],
+        default="paper",
+        help="Laser preset: 'paper' (1 PW, 0.8 um, 30 fs) or 'unal' (13 kW, 0.8 um, 170 fs).",
+    )
     parser.add_argument("--mode", choices=["ideal", "gaussian"], default="gaussian")
-    parser.add_argument("--lambda0-m", type=float, default=0.8e-6)
+    parser.add_argument("--lambda0-m", type=float, default=None)
     parser.add_argument("--f-number", type=float, default=0.25)
-    parser.add_argument("--power-w", type=float, default=1.0e15)
+    parser.add_argument("--power-w", type=float, default=None)
     parser.add_argument(
         "--pol",
         choices=["z-linear", "circular"],
         default="z-linear",
         help="Polarization mode: 'z-linear' (LP) or 'circular' (CP).",
     )
-    parser.add_argument("--tau-fwhm-s", type=float, default=30.0e-15)
+    parser.add_argument("--tau-fwhm-s", type=float, default=None)
     parser.add_argument("--n-cycles", type=float, default=None, help="Optional pulse duration in optical cycles (overrides --tau-fwhm-s).")
-    parser.add_argument("--energy-gev", type=float, default=1.0)
+    parser.add_argument("--energy-gev", type=float, default=None)
     parser.add_argument("--w0-over-rmax", type=float, default=0.7)
     parser.add_argument("--apod-order", type=float, default=8.0)
     parser.add_argument("--nx", type=int, default=64)
@@ -172,19 +191,24 @@ def main(argv=None) -> int:
     parser.add_argument("--out-json", default=str(REPO_ROOT / "outs.json"))
     args = parser.parse_args(argv)
 
+    preset = C.UNAL_TISAPPHIRE_LASER if args.preset == "unal" else C.PAPER_FSQED_LASER
+    lambda0_m = preset["lambda0_m"] if args.lambda0_m is None else args.lambda0_m
+    power_w = preset["power_w"] if args.power_w is None else args.power_w
+    energy_gev = preset["energy_gev"] if args.energy_gev is None else args.energy_gev
+    base_tau = preset["tau_fwhm_s"] if args.tau_fwhm_s is None else args.tau_fwhm_s
     tau_fwhm_s = (
-        C.tau_fwhm_from_cycles(args.n_cycles, args.lambda0_m)
+        C.tau_fwhm_from_cycles(args.n_cycles, lambda0_m)
         if args.n_cycles is not None
-        else args.tau_fwhm_s
+        else base_tau
     )
     params = {
-        "lambda0_m": args.lambda0_m,
+        "lambda0_m": lambda0_m,
         "f_number": args.f_number,
-        "power_w": args.power_w,
+        "power_w": power_w,
         "pol": args.pol,
         "tau_fwhm_s": tau_fwhm_s,
         "n_cycles": args.n_cycles,
-        "energy_gev": args.energy_gev,
+        "energy_gev": energy_gev,
         "mode": args.mode,
         "w0_over_rmax": args.w0_over_rmax,
         "apod_order": args.apod_order,

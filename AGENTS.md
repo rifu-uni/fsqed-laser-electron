@@ -45,30 +45,24 @@ The codebase is split into two independent packages that communicate solely via 
 - **Poynting flux & transverse box size:**
   - `focus.compute_checks()` compares focal-plane Poynting flux `p0` (`iy = Ny // 2`, negative for $-\hat{\mathbf{y}}$ propagation) against `power_w` via `abs((-p0) - power_w) / power_w`.
   - `cli.py` defaults to `span_xy_m = 6.4e-6` ($8\lambda_0$), giving `power_conservation_rel_err ~ 1.5%` at $64^3$ (`gaussian` mode) — well below `load_field_pack`'s `max_power_rel_err = 0.10` threshold.
-- **Polarization guard (Option A active):**
-  - `cli.py` (`generate_field_pack` and `--pol`) fails fast with `NotImplementedError` / `choices=["z-linear"]` whenever `pol != "z-linear"`, preventing silently mislabeled `"circular"` packs. `metadata.py` and `data/schema.json` retain `"circular"` support for Option B below.
-- **`outs.json` snapshot:** Refreshed for the current $64^3$ `gaussian` defaults (`mode: "gaussian"`, `power_conservation_rel_err ≈ 0.015`, `degradation` metrics included).
+- **Circular polarization (`pol="circular"`):**
+  - `focus.py`, `sweep.py`, and `cli.py` support both `"z-linear"` and `"circular"` ($\mathbf{E}_{\mathrm{ff}}^{(z)} + i\,\mathbf{E}_{\mathrm{ff}}^{(x)}$ superposition), with `compute_checks` and `sweep.py` evaluating the real instantaneous rotating field amplitude ($E_0/\sqrt{2}$), matching `src.particles.fields` and `src.particles.qed`.
+- **Transmission, area-weighted degradation & Fig. 4 sweep:**
+  - `comparison.py` computes circular-disk area-weighted ($R\,dR$) `mse`, `rmse`, `correlation`, `aperture_transmission`, `apodizer_transmission`, and `total_transmission`.
+  - `sweep.py` covers `[0.02, 2.0]` in `default_f_number_sweep()` (matching PDF Fig. 4) and accepts `power_transmission` to fold optical losses into `kappa_eff`.
+  - `cli.py` adds `--preset {paper,unal}` and `--account-for-losses`. `presentation_plots.py` renders 7 comparison figures in `images/` (including Paper FSQED and UNAL Ti:Sapphire curves).
+- **`outs.json` snapshot:** Refreshed for the current $64^3$ `gaussian` defaults (`mode: "gaussian"`, `power_conservation_rel_err ≈ 0.015`, area-weighted `degradation` metrics + `kappa_eff_focal`/`kappa_eff_effective` included).
 
 ---
 
-## 5. Completed Milestones & Remaining Planned Work
+## 5. Completed Milestones & Optional Future Work
 
-### Completed (`feat/mirrored-gaussian-beam`)
-- **DONE — Global Phase Alignment:** `focus.align_global_phase(Ec, Bc)` rotates `(Ec, Bc)` by a single unit scalar from the peak field so `Ec` is real and positive at $t_{\mathrm{ref}} = 0$ (preserving Maxwell's equations and all relative phases). `@pytest.mark.xfail` has been removed from `tests/test_integration.py::test_raw_optics_pack_loads_in_particles`, which passes for both `"gaussian"` and `"ideal"` modes.
-- **DONE — Exact Debye `Bc` Reconstruction:** Each plane wave $e^{-ik\mathbf{n}\cdot\mathbf{r}}$ has $\mathbf{k} = -k\mathbf{n}$, so under $e^{+i\omega t}$ Faraday's law gives $\mathbf{B}_{\mathrm{far}}(\mathbf{n}) = +\frac{1}{c}\,\mathbf{n}\times\mathbf{E}_{\mathrm{far}}(\mathbf{n})$ algebraically. `focal_field_angular_spectrum` accumulates exact `Bc` alongside `Ec` inside the Debye quadrature (zero finite-difference dispersion). `magnetic_field_from_curl` is kept as a standalone helper and cross-checked in `tests/test_optics.py::test_curl_b_matches_direct_b`.
-- **DONE — Mirror Reflection + Gaussian Pipeline & Degradation Comparison:** Integrated `gaussian.py`, `focus.mirror_reflection_far_field` / `gaussian_far_field` / `ideal_far_field`, `comparison.py`, and dual-mode `cli.py` (`--mode gaussian|ideal`) + `sweep.py` (`ideal_far_field_builder`, `gaussian_far_field_builder`).
-- **DONE — Vectorized Debye Quadrature & Full Metadata Validation:** Ring-factored `np.einsum` + outer `ph_y` evaluation in `focus.focal_field_angular_spectrum` and `focal_field_slice`; `metadata.build_metadata` validates the full metadata dict (including collision-checked `extra` keys) against `data/schema.json` before returning.
-
-### Remaining: Circular Polarization — Option B (after LP baseline)
-1. Add `pol: Literal["z-linear", "circular"] = "z-linear"` to `bi_dipole_far_field` / `mirror_reflection_far_field` / `focal_field_angular_spectrum` / `focal_field_slice` / `cli.py`:
-   - For `"circular"`, superimpose the $\hat{\mathbf{z}}$-polarized and $90^\circ$-rotated $\hat{\mathbf{x}}$-polarized far fields with a $\pm i$ phase shift ($\mathbf{E}_{\mathrm{ff}}^{(z)} + i\,\mathbf{E}_{\mathrm{ff}}^{(x)}$; power normalization automatically supplies the $1/\sqrt{2}$ amplitude scaling).
-2. Update `focus.compute_checks(..., pol=...)`:
-   - Evaluate `a_max` and `chi_max_per_GeV` from the **real instantaneous vector field at `t_ref_s`** (matching `src.particles.fields._compute_peak_e_at_t_ref`), **not** `np.max(np.abs(Ec))` or complex norm $\sqrt{|E_{c,x}|^2 + |E_{c,z}|^2}$ (which overstates CP's real rotating field amplitude $|\mathbf{E}(0, t)| = E_0/\sqrt{2}$ by $\sqrt{2}$).
-   - Scale `a_max_expected` by $1/\sqrt{2}$ for `"circular"` (and optionally include the truncated bi-dipole factor $\sqrt{(8 - (1 + \cos\zeta)^3)/8}$).
-3. Remove the `pol != "z-linear"` `NotImplementedError` guard and `choices=["z-linear"]` restriction in `cli.py` to re-enable `--pol circular`.
-4. Add CP integration tests verifying `load_field_pack` and `src.particles.qed` CP selection cuts ($\alpha > 0.7\,a_{\max}^{\mathrm{CP}}/\gamma$, reproducing PDF Fig. 2 & Fig. 5(b)).
+### Completed
+- **DONE — Global Phase Alignment:** `focus.align_global_phase(Ec, Bc)` rotates `(Ec, Bc)` by a single unit scalar from the peak field so `Ec` is real and positive at $t_{\mathrm{ref}} = 0$ (preserving Maxwell's equations and all relative phases, preferring $E_z$ on ties for CP parity).
+- **DONE — Exact Debye `Bc` Reconstruction:** `focal_field_angular_spectrum` accumulates exact `Bc` alongside `Ec` inside the vectorized ring-factored Debye quadrature (`np.einsum` + outer `ph_y`), cross-checked against `magnetic_field_from_curl`.
+- **DONE — Mirror Reflection + Gaussian Pipeline & Degradation Comparison:** Integrated `gaussian.py`, `focus.mirror_reflection_far_field` / `gaussian_far_field` / `ideal_far_field`, area-weighted `comparison.py` (`mse`, `rmse`, `correlation`, aperture/apodizer transmission), and dual-mode `cli.py` + `sweep.py`.
+- **DONE — Circular Polarization (Option B):** Implemented `"circular"` across `focus.py`, `sweep.py`, and `cli.py`, verified against `src.particles.fields.load_field_pack` and `src.particles.qed` CP selection cuts in `tests/test_integration.py`.
+- **DONE — Fig. 4 Sweep Range & Paper/UNAL Comparison Plots:** Aligned `sweep.default_f_number_sweep()` to `[0.02, 2.0]` and updated `presentation_plots.py` with Paper FSQED vs. UNAL Ti:Sapphire comparisons.
 
 ### Optional / Future Improvements
-- **Fig. 4 sweep range:** `sweep.default_f_number_sweep()` stops at $f = 0.25$, whereas PDF Fig. 4 extends down toward $f \to 0$ (opening angles up to $170^\circ$ wrapping past $90^\circ$ into the $+y$ hemisphere). Both `focus.f_number_to_theta_max` and `focus.mirror_reflection_far_field` already support $f < 0.25$ for $\theta < \pi$.
-- **Area-weighted MSE in `comparison.py`:** `compare_profiles` currently normalizes intensity profiles with radial area weight $R$ (`np.trapezoid(I * R, R)`), then computes an unweighted `np.mean((Ii - Ir) ** 2)`; weighting the MSE integral by $R\,dR$ over the circular mirror aperture would make the metric directly area-consistent.
-- **Pre-mirror FFT propagation / thin-lens phase:** If modeling non-collimated or aberrated beams before the parabolic mirror becomes necessary, re-introduce 2D paraxial angular-spectrum propagation / thin-lens phase in `gaussian.py` feeding a complex `incident_amplitude` callback into `mirror_reflection_far_field`.
+- **Pre-mirror FFT propagation / thin-lens phase:** Intentionally omitted while treating the beam incident on the parabolic mirror as collimated; if modeling non-collimated or aberrated beams becomes necessary later, 2D paraxial angular-spectrum propagation / thin-lens phase can feed a complex `incident_amplitude` callback into `mirror_reflection_far_field`.

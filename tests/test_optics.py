@@ -388,6 +388,44 @@ def test_area_weighted_mse_rmse_and_correlation():
         comparison.compare_profiles(ones, ones, -R)
 
 
+def test_default_fig4_sweep_range_and_presets():
+    fns = sweep.default_f_number_sweep()
+    assert fns[0] == pytest.approx(0.02)
+    assert fns[-1] == pytest.approx(2.0)
+    assert 0.25 in fns
+    assert sweep.f_number_to_opening_angle_deg(0.25) == pytest.approx(90.0)
+    assert sweep.f_number_to_opening_angle_deg(0.02) > 170.0
+
+    ideal = sweep.kappa_eff_vs_f_number(
+        fns, **C.PAPER_FIG4_LASER, far_field_builder=sweep.ideal_far_field_builder(), ntheta=256, nphi=128
+    )
+    gauss = sweep.kappa_eff_vs_f_number(
+        fns,
+        **C.PAPER_FIG4_LASER,
+        far_field_builder=sweep.gaussian_far_field_builder(),
+        power_transmission=sweep.gaussian_transmission(),
+        ntheta=256,
+        nphi=128,
+    )
+    # Near full 4pi (f=0.02, ~170.85 deg), ideal approaches kappa_max = 5.25 within 1%.
+    assert abs(ideal[0]["kappa_eff"] - C.KAPPA_BIDIPOLE_MAX) / C.KAPPA_BIDIPOLE_MAX < 0.01
+    kappas_ideal = [r["kappa_eff"] for r in ideal]
+    assert all(kappas_ideal[i] > kappas_ideal[i + 1] for i in range(len(kappas_ideal) - 1))
+    assert all(np.isfinite(r["kappa_eff"]) and r["kappa_eff"] < ri["kappa_eff"] for r, ri in zip(gauss, ideal))
+
+    # UNAL Ti:Sapphire preset scale check (~2.2e-5 per GeV at f=0.25).
+    unal = sweep.kappa_eff_vs_f_number(
+        [0.25],
+        lambda0_m=C.UNAL_TISAPPHIRE_LASER["lambda0_m"],
+        power_w=C.UNAL_TISAPPHIRE_LASER["power_w"],
+        energy_gev=C.UNAL_TISAPPHIRE_LASER["energy_gev"],
+        far_field_builder=sweep.ideal_far_field_builder(),
+        ntheta=128,
+        nphi=128,
+    )
+    assert 1.5e-5 < unal[0]["chi_max_per_GeV"] < 3.0e-5
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
