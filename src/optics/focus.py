@@ -26,6 +26,8 @@ Global conventions (see README):
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from . import constants as C
@@ -95,6 +97,30 @@ def _centered_axis(span_m: float, npts: int) -> tuple[float, float]:
     step = span_m / npts
     start = -(npts // 2) * step
     return start, step
+
+
+def align_global_phase(
+    Ec: np.ndarray, Bc: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rotate ``(Ec, Bc)`` by a constant unit phase so peak ``E`` aligns with ``t = 0``.
+
+    Multiplying both phasors by a single unit scalar preserves Maxwell's
+    equations and all relative phases (including ``E``-``B`` and circular
+    polarization phase shifts) while enforcing synchronous peaking at ``t = 0``.
+    Expects ``(3, nz, ny, nx)`` complex arrays.
+    """
+    if Ec.ndim != 4 or Ec.shape[0] != 3 or Bc.shape != Ec.shape:
+        raise ValueError(
+            f"Expected Ec and Bc with matching shape (3, nz, ny, nx), got {Ec.shape} and {Bc.shape}"
+        )
+    e_norm = np.sqrt(np.sum(np.abs(Ec) ** 2, axis=0))
+    iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_norm)), e_norm.shape))
+    comp = int(np.argmax(np.abs(Ec[:, iz, iy, ix])))
+    ref = Ec[comp, iz, iy, ix]
+    if abs(ref) == 0.0:
+        return Ec, Bc
+    rot = np.conj(ref) / abs(ref)
+    return Ec * rot, Bc * rot
 
 
 def focal_field_angular_spectrum(
@@ -191,22 +217,22 @@ def focal_field_angular_spectrum(
 
     # Debye integral: E(r) = -(i/lambda) C sum_{theta,phi} w far(n) e^{-ik n.r}.
     pref = -1j * Cscale / lambda0_m
-    amp = pref * w[..., None] * far  # (ntheta, nphi, 3)
+    amp = pref * w[..., None] * far  # (ntheta, nphi, 3) -- E plane-wave amplitudes
+    amp_B = (1.0 / C.C_LIGHT) * pref * w[..., None] * np.cross(n, far)  # B = (1/c) n x E
 
     Ec = np.zeros((3, nz, ny, nx), dtype=np.complex128)
+    Bc = np.zeros((3, nz, ny, nx), dtype=np.complex128)
     for i in range(ntheta):
         sth = np.sin(th[i])
-        # Phase factors that depend only on phi (shared by the theta ring).
         gx = np.exp(-1j * k * np.outer(sth * np.cos(ph), X))  # (nphi, nx)
         gz = np.exp(-1j * k * np.outer(sth * np.sin(ph), Z))  # (nphi, nz)
-        ph_y = np.exp(-1j * k * (-np.cos(th[i])) * Y)  # (ny,)
-        for j in range(nphi):
-            phase = gz[j][:, None, None] * ph_y[None, :, None] * gx[j][None, None, :]
-            for comp in range(3):
-                Ec[comp] += amp[i, j, comp] * phase
+        ph_y = np.exp(-1j * k * (-np.cos(th[i])) * Y)         # (ny,)
+        slice_E = np.einsum("pc,pz,px->czx", amp[i], gz, gx)
+        slice_B = np.einsum("pc,pz,px->czx", amp_B[i], gz, gx)
+        Ec += slice_E[:, :, None, :] * ph_y[None, None, :, None]
+        Bc += slice_B[:, :, None, :] * ph_y[None, None, :, None]
 
-    Bc = magnetic_field_from_curl(Ec, dx, dy, dz, omega)
-
+    Ec, Bc = align_global_phase(Ec, Bc)
     grid = {
         "x0_m": float(x0), "dx_m": float(dx), "Nx": int(nx),
         "y0_m": float(y0), "dy_m": float(dy), "Ny": int(ny),
@@ -302,18 +328,16 @@ def focal_field_slice(
     for i in range(ntheta):
         sth = np.sin(th[i])
         cth = np.cos(th[i])
-        for j in range(nphi):
-            nxv = sth * np.cos(ph[j])
-            nyv = -cth
-            nzv = sth * np.sin(ph[j])
-            n_comp = {"x": nxv, "y": nyv, "z": nzv}
-            # 2-D phase = exp(-i k (n_a1 a1 + n_a2 a2 + n_fixed coord_m)).
-            f1 = np.exp(-1j * k * n_comp[a1_name] * axis1)   # (n1,)
-            f2 = np.exp(-1j * k * n_comp[a2_name] * axis2)   # (n2,)
-            fixed = np.exp(-1j * k * n_comp[fixed_name] * coord_m)
-            phase = f2[:, None] * f1[None, :] * fixed        # (n2, n1)
-            for comp in range(3):
-                Ec[comp] += amp[i, j, comp] * phase
+        n_comp = {
+            "x": sth * np.cos(ph),
+            "y": np.full_like(ph, -cth),
+            "z": sth * np.sin(ph),
+        }
+        f1 = np.exp(-1j * k * np.outer(n_comp[a1_name], axis1))     # (nphi, n1)
+        f2 = np.exp(-1j * k * np.outer(n_comp[a2_name], axis2))     # (nphi, n2)
+        fixed = np.exp(-1j * k * n_comp[fixed_name] * coord_m)       # (nphi,)
+        amp_ring = amp[i] * fixed[:, None]                           # (nphi, 3)
+        Ec += np.einsum("pc,pb,pa->cba", amp_ring, f2, f1)
 
     grid = {
         a1_name: (float(a1_start), float(a1_step), int(n1)),
@@ -386,10 +410,9 @@ def compute_checks(
     E = Ec[0]  # strip Nf axis -> (3, nz, ny, nx)
     B = None if Bc is None else Bc[0]
 
-    emag = np.abs(E)
-    idx = np.unravel_index(int(np.argmax(emag)), emag.shape)
-    comp, iz, iy, ix = (int(v) for v in idx)
-    a_max = float(emag[comp, iz, iy, ix] / E_rel)
+    e_mag = np.sqrt(np.sum(np.abs(E) ** 2, axis=0))
+    iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_mag)), e_mag.shape))
+    a_max = float(e_mag[iz, iy, ix] / E_rel)
 
     # chi ~ 2 gamma |E_perp| / E_cr  (head-on collision, electron along +y).
     e_perp = np.sqrt(np.abs(E[0]) ** 2 + np.abs(E[2]) ** 2)
@@ -402,13 +425,14 @@ def compute_checks(
         float(grid["z0_m"] + iz * grid["dz_m"]),
     ]
 
-    # Power conservation across two different y planes.
-    # The laser propagates along -y, so the Poynting flux p0 is negative.
+    # Energy conservation: the near-field Poynting flux through the focal plane
+    # must match the far-field power used for normalization (= power_w).  The
+    # residual reflects the finite transverse-grid truncation (beam wings
+    # outside the window), not a field error (the direct Debye B is exact).
     if B is not None:
-        nyy = E.shape[2]  # y axis of (3, nz, ny, nx)
-        p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=nyy // 2)
-        p1 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=max(nyy // 4, 0))
-        p_err = float(abs(p0 - p1) / abs(p0)) if abs(p0) > 0.0 else 0.0
+        p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=E.shape[2] // 2)
+        # Laser propagates along -y, so Poynting flux p0 must be negative.
+        p_err = float(abs((-p0) - power_w) / power_w)
     else:
         p_err = 0.0
 
@@ -424,3 +448,86 @@ def compute_checks(
     }
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Realistic optical pipeline: Gaussian beam + apodizer + mirror reflection.
+# --------------------------------------------------------------------------- #
+def mirror_reflection_far_field(
+    n: np.ndarray,
+    *,
+    f_number: float,
+    incident_amplitude: Callable[[np.ndarray], np.ndarray],
+) -> np.ndarray:
+    """Reflect a z-linear-polarized collimated beam off the parabola -> far field.
+
+    Maps the mirror radius ``R = 2 L tan(theta/2)`` to the ray direction ``n``, applies
+    the local-normal polarization reflection ``E^p = E - 2 (E . N) N`` and the
+    energy-conserving amplitude apodization ``2 / (1 + cos(theta))`` of the parabolic
+    mirror.
+
+    Parameters
+    ----------
+    n : np.ndarray, shape (..., 3)
+        Unit direction from the focus toward the mirror (``n_y < 0`` hemisphere;
+        ``n_y > 0`` supported for ``f_number < 0.25`` up to ``theta < pi``).
+    f_number : float
+        Mirror f-number ``L/(2 R_max)`` (defines the aperture ``theta_max``).
+    incident_amplitude : callable
+        ``incident_amplitude(r) -> amplitude`` at normalized radius ``r = R/R_max``.
+
+    Returns
+    -------
+    np.ndarray, shape (..., 3)
+        Far-field electric phasor ``(Ex, Ey, Ez)`` (dimensionless shape).
+    """
+    ny = n[..., 1]
+    cos_theta = np.clip(-ny, -1.0, 1.0)  # n_y = -cos(theta)
+    denom = 1.0 + cos_theta
+    if np.any(denom <= 0.0):
+        raise ValueError("Ray at theta=pi (n_y=+1) is singular for parabolic mirror")
+    theta = np.arccos(cos_theta)
+    theta_max = f_number_to_theta_max(f_number)
+    r_over_rmax = np.tan(theta / 2.0) / np.tan(theta_max / 2.0)
+
+    E_in = np.zeros_like(n)
+    E_in[..., 2] = incident_amplitude(r_over_rmax)  # z-linear polarization
+    E_refl = reflect(E_in, mirror_normal(n))
+    apod = 2.0 / denom
+    return E_refl * apod[..., None]
+
+
+def ideal_far_field(n: np.ndarray, *, f_number: float) -> np.ndarray:
+    """Ideal Sheppard-Larkin far field, obtained by reflecting I^p(R) (eq. 13).
+
+    This reproduces :func:`bi_dipole_far_field` (eqs. 9-10) up to a constant factor,
+    which is a self-consistency check of the mirror-reflection pipeline.
+    """
+    from .gaussian import ideal_incident_amplitude
+
+    return mirror_reflection_far_field(
+        n,
+        f_number=f_number,
+        incident_amplitude=lambda r: ideal_incident_amplitude(r, f_number=f_number),
+    )
+
+
+def gaussian_far_field(
+    n: np.ndarray,
+    *,
+    f_number: float,
+    w0_over_rmax: float = 0.7,
+    apod_order: float = 8.0,
+) -> np.ndarray:
+    """Realistic far field: a Gaussian beam shaped by an apodizer, reflected off the
+    parabolic mirror.  This is the full optical pipeline (input beam + optical system).
+    """
+    from .gaussian import gaussian_incident_amplitude
+
+    return mirror_reflection_far_field(
+        n,
+        f_number=f_number,
+        incident_amplitude=lambda r: gaussian_incident_amplitude(
+            r, w0_over_rmax=w0_over_rmax, apod_order=apod_order
+        ),
+    )

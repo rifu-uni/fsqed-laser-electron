@@ -4,7 +4,7 @@
 Numerical reproduction of Olofsson & Gonoskov, *"Attaining a strong-field QED signal at laser-electron colliders with optimized focusing"*, Phys. Rev. A **106**, 063512 (2022) ([PDF](docs/Olofsson%20and%20Gonoskov%20-%202022%20-%20Attaining%20a%20strong-field%20QED%20signal%20at%20laser-electron%20colliders%20with%20optimized%20focusing.pdf)).
 
 The codebase is split into two independent packages that communicate solely via compressed `.npz` **field packs** validated against [`data/schema.json`](data/schema.json):
-- `src/optics/` — non-paraxial focal-field solver and aperture sweeps (see [`docs/OPTICS.md`](docs/OPTICS.md)).
+- `src/optics/` — non-paraxial focal-field solver, parabolic-mirror Gaussian pipeline, degradation comparison, and aperture sweeps (see [`docs/OPTICS.md`](docs/OPTICS.md)).
 - `src/particles/` — relativistic Vay/Boris electron pusher, LCFA QED emission, selection cuts, and $3\sigma$ collider statistics (see [`docs/PARTICLES.md`](docs/PARTICLES.md)).
 
 ---
@@ -34,45 +34,41 @@ The codebase is split into two independent packages that communicate solely via 
 ---
 
 ## 4. Key Architectural Choices & Current State
-- **Why `src/optics` starts from `bi_dipole_far_field(n)`:**
-  - In Sec. IV (p. 4, Eq. (13)) of the paper, Olofsson & Gonoskov prove analytically via $\mathbf{E}^p = \mathbf{E} - 2(\mathbf{E}\cdot\mathbf{N})\mathbf{N}$ that reflecting a $\hat{\mathbf{z}}$-polarized beam with the Sheppard–Larkin radial intensity profile $I^p(R) \propto [(R/2L)^2 + 1]^{-4}$ off a parabolic mirror produces the exact `bi_dipole_far_field(n)` truncated at $\theta \le \theta_{\max}(f)$.
-  - `focus.focal_field_angular_spectrum()` then evaluates the **non-paraxial 3D vectorial Debye integral** over $(\theta, \phi)$ to synthesize the diffracted 3D focal field $\mathbf{E}_c(x, y, z)$. Unlike `src.particles.fields.make_analytic_bidipole_pack()` (which only rescales the amplitude of an ideal $4\pi$ spherical-Bessel dipole), `src/optics` captures the actual finite-$f$-number 3D diffraction geometry (transverse waist, Rayleigh length, aperture fringes).
-- **Standalone / unwired helpers:**
-  - `src/optics/gaussian.py` (Gaussian source, thin lens, apodizer, 2D paraxial FFT propagation, power transmission) and `focus.mirror_normal` / `focus.reflect` are standalone helpers implementing the extended paraxial shaping pipeline from `README.md`. They are **not wired** into `cli.py` or `sweep.py` because the PDF never models a spatial Gaussian beam or lens; only wire them in if extending *beyond* the paper via a custom `far_field(n)` callback.
+- **Dual-mode far-field pipeline (`feat/mirrored-gaussian-beam`):**
+  - `cli.py` and `sweep.py` now support both the realistic parabolic-mirror Gaussian pipeline (`--mode gaussian`, default) and the ideal Sheppard–Larkin benchmark (`--mode ideal`, `bi_dipole_far_field`).
+  - **Realistic mode (`--mode gaussian`):** `gaussian.py` evaluates normalized-radius ($r = R/R_{\max}$) incident profiles (`gaussian_source`, `apodizer`, `gaussian_incident_amplitude`), and `focus.mirror_reflection_far_field` maps $r = \tan(\theta/2)/\tan(\theta_{\max}/2)$, applies local-normal reflection $\mathbf{E}^p = \mathbf{E} - 2(\mathbf{E}\cdot\mathbf{N})\mathbf{N}$ (`mirror_normal`, `reflect`) and the parabolic mirror amplitude Jacobian $2/(1+\cos\theta)$, supporting $f < 0.25$ up to $\theta < \pi$.
+  - **Ideal baseline (`--mode ideal`):** In Sec. IV (p. 4, Eq. (13)) of the paper, reflecting a $\hat{\mathbf{z}}$-polarized beam with $I^p(R) \propto [(R/2L)^2 + 1]^{-4}$ off a parabolic mirror produces `bi_dipole_far_field(n)`. `focus.ideal_far_field` runs `ideal_incident_amplitude` through `mirror_reflection_far_field` as a self-consistency check matching `bi_dipole_far_field` up to a constant scale.
+  - **Quantitative degradation (`comparison.py`):** Compares `gaussian_incident_amplitude` against `ideal_incident_amplitude` (`incident_intensity_profiles`, `compare_profiles`, `apodizer_transmission`, `summarize_degradation`), attaching `mse`, `correlation`, and `transmission` under `metadata["degradation"]` in `gaussian` mode.
+  - **Configurable laser parameters:** `cli.py` defaults to PW-class FSQED Ti:Sapphire parameters ($\lambda_0 = 0.8\,\mu\mathrm{m}$, $P = 1\,\mathrm{PW}$, $\tau_{\mathrm{FWHM}} = 30\,\mathrm{fs}$, $f = 0.25$, optional `--n-cycles`), while exposing `--lambda0-m`, `--power-w`, `--tau-fwhm-s`, `--w0-over-rmax`, and `--apod-order` so non-FSQED setups (e.g. campus Ti:Sapphire parameters such as $170\,\mathrm{fs}$, $13\,\mathrm{kW}$, $390\text{–}1040\,\mathrm{nm}$) can be modeled directly via CLI flags.
+- **Vectorized Debye synthesis & exact $\mathbf{B}_c$:**
+  - `focus.focal_field_angular_spectrum()` evaluates the non-paraxial 3D vectorial Debye integral via vectorized ring-factored quadrature (`np.einsum` + outer `ph_y`), accumulating exact $\mathbf{B}_c$ alongside $\mathbf{E}_c$ using $\mathbf{B}_{\mathrm{far}}(\mathbf{n}) = +\frac{1}{c}\,\mathbf{n}\times\mathbf{E}_{\mathrm{far}}(\mathbf{n})$, and calls `align_global_phase(Ec, Bc)` so peak $\mathbf{E}_c$ is real and positive at $t_{\mathrm{ref}} = 0$.
 - **Poynting flux & transverse box size:**
-  - `focus.compute_checks()` uses `abs(p0 - p1) / abs(p0)` (`abs(p0) > 0.0`) because $S_y < 0$ for $-\hat{\mathbf{y}}$ propagation.
-  - `cli.py` defaults to `span_xy_m = 6.4e-6` ($8\lambda_0$) so lateral flux escape for $f/0.25$ stays below `load_field_pack`'s `max_power_rel_err = 0.10` threshold (`~8.3%` at $64^3$; vs. `~18.4%` at `4.0e-6`).
+  - `focus.compute_checks()` compares focal-plane Poynting flux `p0` (`iy = Ny // 2`, negative for $-\hat{\mathbf{y}}$ propagation) against `power_w` via `abs((-p0) - power_w) / power_w`.
+  - `cli.py` defaults to `span_xy_m = 6.4e-6` ($8\lambda_0$), giving `power_conservation_rel_err ~ 1.5%` at $64^3$ (`gaussian` mode) — well below `load_field_pack`'s `max_power_rel_err = 0.10` threshold.
 - **Polarization guard (Option A active):**
-  - `cli.py` (`generate_field_pack` and `--pol`) fails fast with `NotImplementedError` whenever `pol != "z-linear"`, preventing silently mislabeled `"circular"` packs. `metadata.py` and `data/schema.json` retain `"circular"` support for Option B below.
-- **Stale snapshot:** `outs.json` at the repo root predates the `span_xy_m` / `power_conservation_rel_err` fixes and should be regenerated once baseline optics fixes settle.
+  - `cli.py` (`generate_field_pack` and `--pol`) fails fast with `NotImplementedError` / `choices=["z-linear"]` whenever `pol != "z-linear"`, preventing silently mislabeled `"circular"` packs. `metadata.py` and `data/schema.json` retain `"circular"` support for Option B below.
+- **`outs.json` snapshot:** Refreshed for the current $64^3$ `gaussian` defaults (`mode: "gaussian"`, `power_conservation_rel_err ≈ 0.015`, `degradation` metrics included).
 
 ---
 
-## 5. Pending Decisions & Planned Work (In Order)
+## 5. Completed Milestones & Remaining Planned Work
 
-### 1. Global Phase Alignment (`-1j` Gouy phase blocker — needed for LP baseline)
-- **Current state:** `focus.focal_field_angular_spectrum` (and `focal_field_slice`, `sweep.focal_field_vector`) uses `pref = -1j * Cscale / lambda0_m`. For real `bi_dipole_far_field`, `Ec(0)` is purely imaginary (`Re[Ec(0)] = 0`), whereas `src.particles.fields.load_field_pack` validates `checks.a_max` against $\max_{\mathbf{r}}|\mathrm{Re}[\mathbf{E}_c(\mathbf{r}) e^{i\omega t_{\mathrm{ref}}}]|$ at `t_ref_s = 0.0`. As a result, `load_field_pack` fails (`rel_diff = 19.3% > 5%`).
-- **Pinned test:** `tests/test_integration.py::test_raw_optics_pack_loads_in_particles` is currently `@pytest.mark.xfail(strict=True, raises=ValueError, ...)`, while `test_phase_aligned_optics_pack_propagates_in_particles` verifies end-to-end propagation after multiplying `(Ec, Bc)` by `-1j`.
-- **Preferred fix:** Phase-align `(Ec, Bc)` by a single global unit scalar $e^{-i\phi_0}$ (chosen from the peak field at focus so `Ec` at peak is real and positive at `t_ref_s = 0`).
-  - Matches PDF Sec. III Eqs. (6)–(7) *"synchronous peaking"* at $t = 0$.
-  - Preserves Maxwell's equations and all relative phases ($\mathbf{E}$–$\mathbf{B}$ and CP's $\pi/2$ phase).
-  - Remains valid even if `far_field(n)` is complex (e.g., if `gaussian.py` + `thin_lens_phase` + `reflect` are later wired in).
-  - Once landed: remove `@pytest.mark.xfail` from `test_raw_optics_pack_loads_in_particles`, regenerate `outs.json`, and run LP baseline comparisons against `make_analytic_bidipole_pack` and PDF Fig. 5(a).
+### Completed (`feat/mirrored-gaussian-beam`)
+- **DONE — Global Phase Alignment:** `focus.align_global_phase(Ec, Bc)` rotates `(Ec, Bc)` by a single unit scalar from the peak field so `Ec` is real and positive at $t_{\mathrm{ref}} = 0$ (preserving Maxwell's equations and all relative phases). `@pytest.mark.xfail` has been removed from `tests/test_integration.py::test_raw_optics_pack_loads_in_particles`, which passes for both `"gaussian"` and `"ideal"` modes.
+- **DONE — Exact Debye `Bc` Reconstruction:** Each plane wave $e^{-ik\mathbf{n}\cdot\mathbf{r}}$ has $\mathbf{k} = -k\mathbf{n}$, so under $e^{+i\omega t}$ Faraday's law gives $\mathbf{B}_{\mathrm{far}}(\mathbf{n}) = +\frac{1}{c}\,\mathbf{n}\times\mathbf{E}_{\mathrm{far}}(\mathbf{n})$ algebraically. `focal_field_angular_spectrum` accumulates exact `Bc` alongside `Ec` inside the Debye quadrature (zero finite-difference dispersion). `magnetic_field_from_curl` is kept as a standalone helper and cross-checked in `tests/test_optics.py::test_curl_b_matches_direct_b`.
+- **DONE — Mirror Reflection + Gaussian Pipeline & Degradation Comparison:** Integrated `gaussian.py`, `focus.mirror_reflection_far_field` / `gaussian_far_field` / `ideal_far_field`, `comparison.py`, and dual-mode `cli.py` (`--mode gaussian|ideal`) + `sweep.py` (`ideal_far_field_builder`, `gaussian_far_field_builder`).
+- **DONE — Vectorized Debye Quadrature & Full Metadata Validation:** Ring-factored `np.einsum` + outer `ph_y` evaluation in `focus.focal_field_angular_spectrum` and `focal_field_slice`; `metadata.build_metadata` validates the full metadata dict (including collision-checked `extra` keys) against `data/schema.json` before returning.
 
-### 2. Circular Polarization — Option B (after LP baseline)
-1. Add `pol: Literal["z-linear", "circular"] = "z-linear"` to `bi_dipole_far_field` / `focal_field_angular_spectrum` / `focal_field_slice` / `cli.py`:
-   - For `"circular"`, superimpose the $\hat{\mathbf{z}}$-polarized and $90^\circ$-rotated $\hat{\mathbf{x}}$-polarized bi-dipole far fields with a $\pm i$ phase shift ($\mathbf{E}_{\mathrm{ff}}^{(z)} + i\,\mathbf{E}_{\mathrm{ff}}^{(x)}$; power normalization automatically supplies the $1/\sqrt{2}$ amplitude scaling).
+### Remaining: Circular Polarization — Option B (after LP baseline)
+1. Add `pol: Literal["z-linear", "circular"] = "z-linear"` to `bi_dipole_far_field` / `mirror_reflection_far_field` / `focal_field_angular_spectrum` / `focal_field_slice` / `cli.py`:
+   - For `"circular"`, superimpose the $\hat{\mathbf{z}}$-polarized and $90^\circ$-rotated $\hat{\mathbf{x}}$-polarized far fields with a $\pm i$ phase shift ($\mathbf{E}_{\mathrm{ff}}^{(z)} + i\,\mathbf{E}_{\mathrm{ff}}^{(x)}$; power normalization automatically supplies the $1/\sqrt{2}$ amplitude scaling).
 2. Update `focus.compute_checks(..., pol=...)`:
    - Evaluate `a_max` and `chi_max_per_GeV` from the **real instantaneous vector field at `t_ref_s`** (matching `src.particles.fields._compute_peak_e_at_t_ref`), **not** `np.max(np.abs(Ec))` or complex norm $\sqrt{|E_{c,x}|^2 + |E_{c,z}|^2}$ (which overstates CP's real rotating field amplitude $|\mathbf{E}(0, t)| = E_0/\sqrt{2}$ by $\sqrt{2}$).
    - Scale `a_max_expected` by $1/\sqrt{2}$ for `"circular"` (and optionally include the truncated bi-dipole factor $\sqrt{(8 - (1 + \cos\zeta)^3)/8}$).
-3. Remove the `pol != "z-linear"` `NotImplementedError` guard in `cli.py` and re-enable `--pol circular`.
+3. Remove the `pol != "z-linear"` `NotImplementedError` guard and `choices=["z-linear"]` restriction in `cli.py` to re-enable `--pol circular`.
 4. Add CP integration tests verifying `load_field_pack` and `src.particles.qed` CP selection cuts ($\alpha > 0.7\,a_{\max}^{\mathrm{CP}}/\gamma$, reproducing PDF Fig. 2 & Fig. 5(b)).
 
-### 3. Exact Debye `Bc` Reconstruction (accuracy upgrade after baseline results)
-- **Current state:** `focus.focal_field_angular_spectrum` reconstructs `Bc = (i/omega) curl(Ec)` via 2nd-order central finite differences (`focus.magnetic_field_from_curl` using `np.gradient`). This underestimates $|B_{c,x}(0)|$ by **~2.3%** at $64^3$ ($\Delta y = 62.5\,\mathrm{nm}$) and **~9%** at $32^3$, and incurs 1st-order boundary errors.
-- **Upgrade:** Each plane wave in the Debye sum has $\mathbf{k} = -k\mathbf{n}$, so Faraday's law gives $\mathbf{B}_{\mathrm{far}}(\mathbf{n}) = -\frac{1}{c}\,\mathbf{n}\times\mathbf{E}_{\mathrm{far}}(\mathbf{n})$ algebraically. Accumulate `Bc` directly inside the Debye quadrature loop using the same `phase` array already computed for `Ec` (exact to machine precision, zero finite-difference dispersion). Keep `magnetic_field_from_curl` as a public helper/fallback.
-
-### 4. Optional / Future Improvements
-- **Fig. 4 sweep range:** `sweep.default_f_number_sweep()` stops at $f = 0.25$, whereas PDF Fig. 4 extends down toward $f \to 0$ (opening angles up to $170^\circ$ wrapping past $90^\circ$ into the $+y$ hemisphere). `focus.f_number_to_theta_max` already supports $f < 0.25$.
-- **Realistic pre-mirror beam pipeline:** Wire `gaussian.py` + `focus.mirror_normal` / `focus.reflect` (including the parabolic surface Jacobian $\propto [(R/2L)^2 + 1]^{-1}$) into a `far_field(n)` factory if comparing lab Gaussian beams against the ideal Sheppard–Larkin profile.
-- **Performance:** Vectorize or Numba-JIT the nested `(ntheta, nphi)` loops in `focus.py` for faster $128^3+$ grids.
+### Optional / Future Improvements
+- **Fig. 4 sweep range:** `sweep.default_f_number_sweep()` stops at $f = 0.25$, whereas PDF Fig. 4 extends down toward $f \to 0$ (opening angles up to $170^\circ$ wrapping past $90^\circ$ into the $+y$ hemisphere). Both `focus.f_number_to_theta_max` and `focus.mirror_reflection_far_field` already support $f < 0.25$ for $\theta < \pi$.
+- **Area-weighted MSE in `comparison.py`:** `compare_profiles` currently normalizes intensity profiles with radial area weight $R$ (`np.trapezoid(I * R, R)`), then computes an unweighted `np.mean((Ii - Ir) ** 2)`; weighting the MSE integral by $R\,dR$ over the circular mirror aperture would make the metric directly area-consistent.
+- **Pre-mirror FFT propagation / thin-lens phase:** If modeling non-collimated or aberrated beams before the parabolic mirror becomes necessary, re-introduce 2D paraxial angular-spectrum propagation / thin-lens phase in `gaussian.py` feeding a complex `incident_amplitude` callback into `mirror_reflection_far_field`.

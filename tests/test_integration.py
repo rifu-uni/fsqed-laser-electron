@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import sys
 from pathlib import Path
@@ -27,10 +26,11 @@ from src.particles import (
 SCHEMA_PATH = REPO_ROOT / "data" / "schema.json"
 
 
-def _make_small_optics_pack() -> dict:
+def _make_small_optics_pack(mode: str = "gaussian") -> dict:
     """Generate a compact optics focal-field pack for integration testing."""
     params = cli.default_parameters()
     params.update(
+        mode=mode,
         nx=32,
         ny=32,
         nz=32,
@@ -70,31 +70,19 @@ def test_optics_npz_matches_particles_schema_and_contract(tmp_path: Path) -> Non
     assert 0.0 < power_rel_err < 0.10
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason=(
-        "Pending phase decision: focus.py -1j Gouy phase makes Re[Ec(0)]=0 at "
-        "t_ref=0, failing load_field_pack a_max self-check"
-    ),
-)
-def test_raw_optics_pack_loads_in_particles(tmp_path: Path) -> None:
-    """Verify raw optics pack triggers expected a_max self-check failure on load."""
-    pack = _make_small_optics_pack()
+@pytest.mark.parametrize("mode", ["gaussian", "ideal"])
+def test_raw_optics_pack_loads_in_particles(tmp_path: Path, mode: str) -> None:
+    """Verify unmodified optics packs load directly via load_field_pack."""
+    pack = _make_small_optics_pack(mode=mode)
     npz_path = cli.save_field_pack(pack, out_dir=tmp_path)
     load_field_pack(npz_path)
 
 
-def test_phase_aligned_optics_pack_propagates_in_particles(tmp_path: Path) -> None:
-    """Verify phase-aligned optics pack loads, evaluates, and pushes electrons cleanly."""
-    pack = _make_small_optics_pack()
-    aligned_pack = {
-        "Ec": pack["Ec"] * (-1j),
-        "Bc": pack["Bc"] * (-1j),
-        "metadata": copy.deepcopy(pack["metadata"]),
-    }
-
-    npz_path = cli.save_field_pack(aligned_pack, out_dir=tmp_path)
+@pytest.mark.parametrize("mode", ["gaussian", "ideal"])
+def test_optics_pack_propagates_in_particles(tmp_path: Path, mode: str) -> None:
+    """Verify optics pack loads, evaluates, and pushes electrons cleanly."""
+    pack = _make_small_optics_pack(mode=mode)
+    npz_path = cli.save_field_pack(pack, out_dir=tmp_path)
     loaded = load_field_pack(npz_path)
 
     e_vec, b_vec = evaluate_eb(loaded, np.zeros(3), 0.0)
