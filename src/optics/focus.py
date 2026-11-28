@@ -12,8 +12,10 @@ Secs. III-IV:
   ``Ec(x, y, z)`` is a superposition of plane waves with the exact propagator
   ``ky = sqrt(k^2 - kx^2 - kz^2)`` (never the paraxial ``k - (kx^2+kz^2)/2k``).
 
-The magnetic phasor ``Bc`` is reconstructed from ``Ec`` via ``B = (i/omega) curl E``
-using central finite differences, matching the convention used by ``src.particles``.
+The magnetic phasor ``Bc`` is computed directly inside the exact Debye quadrature as
+``B_far = (1/c) n x E_far`` (algebraically identical to ``B = (i/omega) curl E`` used
+by ``src.particles``); ``magnetic_field_from_curl`` is kept as a finite-difference
+cross-check.
 
 Global conventions (see README):
 
@@ -26,22 +28,39 @@ Global conventions (see README):
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
+
 import numpy as np
 
 from . import constants as C
 
 
+_VALID_POLS = ("z-linear", "circular")
+
+
+def _validate_pol(pol: str) -> str:
+    if pol not in _VALID_POLS:
+        raise ValueError(f"pol must be one of {_VALID_POLS}, got {pol!r}")
+    return pol
+
+
 # --------------------------------------------------------------------------- #
 # Analytic bi-dipole far field (Sheppard-Larkin input), eqs. (9)-(10).
 # --------------------------------------------------------------------------- #
-def bi_dipole_far_field(n: np.ndarray) -> np.ndarray:
+def bi_dipole_far_field(n: np.ndarray, *, pol: str = "z-linear") -> np.ndarray:
     """Far-field electric phasor of the bi-dipole wave.
 
     Parameters
     ----------
     n : np.ndarray, shape (..., 3)
-        Unit vector(s) pointing *from the focus toward the source*; the incoming
-        radiation arrives from the ``n_y < 0`` hemisphere. Components ``(nx, ny, nz)``.
+        Unit ray-propagation vector(s): under the ``exp(+i omega t)`` convention the
+        plane-wave kernel ``exp(-i k n . r)`` propagates along ``+n``. The radiation
+        arrives from the mirror at ``-n`` (origin inversion), so ``n_y < 0`` for
+        ``theta < pi/2``. Components ``(nx, ny, nz)``.
+    pol : str
+        Polarization mode: ``"z-linear"`` (default) or ``"circular"``
+        (``E_z + i E_x`` superposition).
 
     Returns
     -------
@@ -49,14 +68,17 @@ def bi_dipole_far_field(n: np.ndarray) -> np.ndarray:
         Complex phasor ``(Ex, Ey, Ez)`` (dimensionless shape; the absolute amplitude
         is fixed later by power normalization).
     """
+    _validate_pol(pol)
     nx = n[..., 0]
     ny = n[..., 1]
     nz = n[..., 2]
     # E^e = (z_hat x n) x n  (electric-dipole wave);  E^b = x_hat x n (magnetic-dipole wave).
-    ex = nx * nz
-    ey = nz * (ny - 1.0)
-    ez = ny - nx * nx - ny * ny  # == ny - 1 + nz^2
-    return np.stack([ex, ey, ez], axis=-1)
+    e_z = np.stack([nx * nz, nz * (ny - 1.0), ny - nx * nx - ny * ny], axis=-1)
+    if pol == "z-linear":
+        return e_z
+    # 90-deg rotated mode: z_hat -> x_hat, x_hat -> -z_hat.
+    e_x = np.stack([ny - ny * ny - nz * nz, nx * (ny - 1.0), nx * nz], axis=-1)
+    return e_z + 1j * e_x
 
 
 def f_number_to_theta_max(f_number: float) -> float:
@@ -97,6 +119,83 @@ def _centered_axis(span_m: float, npts: int) -> tuple[float, float]:
     return start, step
 
 
+def align_global_phase(
+    Ec: np.ndarray, Bc: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rotate ``(Ec, Bc)`` by a constant unit phase so peak ``E`` aligns with ``t = 0``.
+
+    Multiplying both phasors by a single unit scalar preserves Maxwell's
+    equations and all relative phases (including ``E``-``B`` and circular
+    polarization phase shifts) while enforcing synchronous peaking at ``t = 0``.
+    Expects ``(3, nz, ny, nx)`` complex arrays.
+    """
+    if Ec.ndim != 4 or Ec.shape[0] != 3 or Bc.shape != Ec.shape:
+        raise ValueError(
+            f"Expected Ec and Bc with matching shape (3, nz, ny, nx), got {Ec.shape} and {Bc.shape}"
+        )
+    e_norm = np.sqrt(np.sum(np.abs(Ec) ** 2, axis=0))
+    iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_norm)), e_norm.shape))
+    mags = np.abs(Ec[:, iz, iy, ix])
+    max_mag = float(np.max(mags))
+    # Prefer z-component on ties (e.g. circular polarization where |Ex| == |Ez| at focus).
+    comp = 2 if mags[2] >= (1.0 - 1.0e-12) * max_mag else int(np.argmax(mags))
+    ref = Ec[comp, iz, iy, ix]
+    if abs(ref) == 0.0:
+        return Ec, Bc
+    rot = np.conj(ref) / abs(ref)
+    return Ec * rot, Bc * rot
+
+
+def _angular_quadrature_grid(
+    theta_max: float, ntheta: int, nphi: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build midpoint ``(theta, phi)`` ray directions and solid-angle quadrature weights."""
+    th_edges = np.linspace(0.0, theta_max, ntheta + 1)
+    th = 0.5 * (th_edges[:-1] + th_edges[1:])
+    ph = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
+    TH, PH = np.meshgrid(th, ph, indexing="ij")
+    n = np.stack(
+        [np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1
+    )
+    w = np.sin(TH) * (th_edges[1] - th_edges[0]) * (2.0 * np.pi / nphi)
+    return th, ph, n, w
+
+
+def expected_net_y_flux(
+    far_field,
+    *,
+    f_number: float,
+    power_w: float,
+    ntheta: int = 40,
+    nphi: int = 80,
+) -> float:
+    """Compute expected net time-averaged Poynting flux (W) across the ``y = 0`` focal plane.
+
+    For ``f_number >= 0.25`` (``theta_max <= pi / 2``), all rays have ``n_y < 0`` and
+    propagate in the ``-y`` direction, yielding ``-power_w``. For deep mirrors
+    (``f_number < 0.25``, ``theta_max > pi / 2``), backward rays (``n_y > 0``) cross
+    ``y = 0`` in the ``+y`` direction and partially cancel the ``-y`` flux.
+    """
+    if not callable(far_field):
+        raise ValueError("far_field must be callable")
+    if not np.isfinite(power_w) or power_w <= 0.0:
+        raise ValueError(f"power_w must be finite and positive, got {power_w}")
+    if not isinstance(ntheta, (int, np.integer)) or isinstance(ntheta, bool) or ntheta < 1:
+        raise ValueError(f"ntheta must be an integer >= 1, got {ntheta}")
+    if not isinstance(nphi, (int, np.integer)) or isinstance(nphi, bool) or nphi < 1:
+        raise ValueError(f"nphi must be an integer >= 1, got {nphi}")
+
+    theta_max = f_number_to_theta_max(f_number)
+    _, _, n, w = _angular_quadrature_grid(theta_max, int(ntheta), int(nphi))
+    far = np.asarray(far_field(n))
+    intensity_w = np.sum(np.abs(far) ** 2, axis=-1) * w
+    i2_tot = float(np.sum(intensity_w))
+    if not np.isfinite(i2_tot) or i2_tot <= 0.0:
+        raise ValueError("far-field pattern carries zero power over the aperture")
+    i2_signed = float(np.sum(np.sign(n[..., 1]) * intensity_w))
+    return float(power_w * (i2_signed / i2_tot))
+
+
 def focal_field_angular_spectrum(
     *,
     lambda0_m: float,
@@ -110,6 +209,7 @@ def focal_field_angular_spectrum(
     ntheta: int = 40,
     nphi: int = 80,
     far_field=None,
+    pol: str = "z-linear",
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Compute the monochromatic focal phasors ``Ec`` and ``Bc`` of a focused beam.
 
@@ -134,7 +234,10 @@ def focal_field_angular_spectrum(
     span_y_m : float, optional
         Longitudinal ``y`` span (m).  Default ``8 * lambda0_m``.
     far_field : callable, optional
-        ``far_field(n) -> E(..., 3)``.  Defaults to :func:`bi_dipole_far_field`.
+        ``far_field(n) -> E(..., 3)`` where ``n`` is the ray-propagation unit vector
+        (the plane-wave kernel ``exp(-i k n . r)`` propagates along ``+n``; the mirror
+        point sits at ``-n`` from the focus, origin inversion).  Defaults to
+        :func:`bi_dipole_far_field`.
 
     Returns
     -------
@@ -145,8 +248,9 @@ def focal_field_angular_spectrum(
     grid : dict
         ``{"x0_m", "dx_m", "Nx", ...}`` describing the Cartesian grid.
     """
+    _validate_pol(pol)
     if far_field is None:
-        far_field = bi_dipole_far_field
+        far_field = lambda n: bi_dipole_far_field(n, pol=pol)
 
     if any(int(v) < 2 for v in (nx, ny, nz)):
         raise ValueError("grid sizes must be >= 2")
@@ -169,19 +273,13 @@ def focal_field_angular_spectrum(
     Y = y0 + np.arange(ny) * dy
     Z = z0 + np.arange(nz) * dz
 
-    # Ray grid: theta measured from the -y axis (the mirror axis), phi azimuth.  This
-    # (theta, phi) parameterization makes the Debye integral a plain, singularity-free
-    # sum of plane waves (no 1/ky Jacobian pole at the NA=1 rim).
-    th_edges = np.linspace(0.0, theta_max, ntheta + 1)
-    th = 0.5 * (th_edges[:-1] + th_edges[1:])
-    ph = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
-    TH, PH = np.meshgrid(th, ph, indexing="ij")
-    n = np.stack(
-        [np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1
-    )
+    # Ray grid: theta measured from the -y axis (the mirror axis), phi azimuth.  Each
+    # grid direction n is the propagation unit vector of its plane wave (the mirror
+    # point sits at -n, origin inversion).  This (theta, phi) parameterization makes
+    # the Debye integral a plain, singularity-free sum of plane waves (no 1/ky
+    # Jacobian pole at the NA=1 rim).
+    th, ph, n, w = _angular_quadrature_grid(theta_max, ntheta, nphi)
     far = far_field(n)  # (ntheta, nphi, 3)
-    d_theta = th_edges[1] - th_edges[0]
-    w = np.sin(TH) * d_theta * (2.0 * np.pi / nphi)  # solid-angle quadrature weight
 
     # Power normalization: P = (1/(2 eta0)) int |E_inf|^2 dOmega, with E_inf = C * far.
     I2 = float(np.sum(np.sum(np.abs(far) ** 2, axis=-1) * w))
@@ -191,22 +289,22 @@ def focal_field_angular_spectrum(
 
     # Debye integral: E(r) = -(i/lambda) C sum_{theta,phi} w far(n) e^{-ik n.r}.
     pref = -1j * Cscale / lambda0_m
-    amp = pref * w[..., None] * far  # (ntheta, nphi, 3)
+    amp = pref * w[..., None] * far  # (ntheta, nphi, 3) -- E plane-wave amplitudes
+    amp_B = (1.0 / C.C_LIGHT) * pref * w[..., None] * np.cross(n, far)  # B = (1/c) n x E
 
     Ec = np.zeros((3, nz, ny, nx), dtype=np.complex128)
+    Bc = np.zeros((3, nz, ny, nx), dtype=np.complex128)
     for i in range(ntheta):
         sth = np.sin(th[i])
-        # Phase factors that depend only on phi (shared by the theta ring).
         gx = np.exp(-1j * k * np.outer(sth * np.cos(ph), X))  # (nphi, nx)
         gz = np.exp(-1j * k * np.outer(sth * np.sin(ph), Z))  # (nphi, nz)
-        ph_y = np.exp(-1j * k * (-np.cos(th[i])) * Y)  # (ny,)
-        for j in range(nphi):
-            phase = gz[j][:, None, None] * ph_y[None, :, None] * gx[j][None, None, :]
-            for comp in range(3):
-                Ec[comp] += amp[i, j, comp] * phase
+        ph_y = np.exp(-1j * k * (-np.cos(th[i])) * Y)         # (ny,)
+        slice_E = np.einsum("pc,pz,px->czx", amp[i], gz, gx)
+        slice_B = np.einsum("pc,pz,px->czx", amp_B[i], gz, gx)
+        Ec += slice_E[:, :, None, :] * ph_y[None, None, :, None]
+        Bc += slice_B[:, :, None, :] * ph_y[None, None, :, None]
 
-    Bc = magnetic_field_from_curl(Ec, dx, dy, dz, omega)
-
+    Ec, Bc = align_global_phase(Ec, Bc)
     grid = {
         "x0_m": float(x0), "dx_m": float(dx), "Nx": int(nx),
         "y0_m": float(y0), "dy_m": float(dy), "Ny": int(ny),
@@ -229,6 +327,7 @@ def focal_field_slice(
     ntheta: int = 64,
     nphi: int = 128,
     far_field=None,
+    pol: str = "z-linear",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Compute the electric phasor ``Ec`` on a 2-D slice through the focus.
 
@@ -256,8 +355,9 @@ def focal_field_slice(
     info : dict
         ``{"plane", "coord_m", "grid"}`` (grid maps axis names to ``(start, step, n)``).
     """
+    _validate_pol(pol)
     if far_field is None:
-        far_field = bi_dipole_far_field
+        far_field = lambda n: bi_dipole_far_field(n, pol=pol)
 
     k = 2.0 * np.pi / lambda0_m
     theta_max = f_number_to_theta_max(f_number)
@@ -283,13 +383,8 @@ def focal_field_slice(
     a1_name, a2_name, fixed_name = plane_map[plane]
 
     # Ray grid (theta from the -y axis, phi azimuth).
-    th_edges = np.linspace(0.0, theta_max, ntheta + 1)
-    th = 0.5 * (th_edges[:-1] + th_edges[1:])
-    ph = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
-    TH, PH = np.meshgrid(th, ph, indexing="ij")
-    n = np.stack([np.sin(TH) * np.cos(PH), -np.cos(TH), np.sin(TH) * np.sin(PH)], axis=-1)
+    th, ph, n, w = _angular_quadrature_grid(theta_max, ntheta, nphi)
     far = far_field(n)  # (ntheta, nphi, 3)
-    w = np.sin(TH) * (th_edges[1] - th_edges[0]) * (2.0 * np.pi / nphi)
 
     I2 = float(np.sum(np.sum(np.abs(far) ** 2, axis=-1) * w))
     if I2 <= 0.0:
@@ -302,18 +397,16 @@ def focal_field_slice(
     for i in range(ntheta):
         sth = np.sin(th[i])
         cth = np.cos(th[i])
-        for j in range(nphi):
-            nxv = sth * np.cos(ph[j])
-            nyv = -cth
-            nzv = sth * np.sin(ph[j])
-            n_comp = {"x": nxv, "y": nyv, "z": nzv}
-            # 2-D phase = exp(-i k (n_a1 a1 + n_a2 a2 + n_fixed coord_m)).
-            f1 = np.exp(-1j * k * n_comp[a1_name] * axis1)   # (n1,)
-            f2 = np.exp(-1j * k * n_comp[a2_name] * axis2)   # (n2,)
-            fixed = np.exp(-1j * k * n_comp[fixed_name] * coord_m)
-            phase = f2[:, None] * f1[None, :] * fixed        # (n2, n1)
-            for comp in range(3):
-                Ec[comp] += amp[i, j, comp] * phase
+        n_comp = {
+            "x": sth * np.cos(ph),
+            "y": np.full_like(ph, -cth),
+            "z": sth * np.sin(ph),
+        }
+        f1 = np.exp(-1j * k * np.outer(n_comp[a1_name], axis1))     # (nphi, n1)
+        f2 = np.exp(-1j * k * np.outer(n_comp[a2_name], axis2))     # (nphi, n2)
+        fixed = np.exp(-1j * k * n_comp[fixed_name] * coord_m)       # (nphi,)
+        amp_ring = amp[i] * fixed[:, None]                           # (nphi, 3)
+        Ec += np.einsum("pc,pb,pa->cba", amp_ring, f2, f1)
 
     grid = {
         a1_name: (float(a1_start), float(a1_step), int(n1)),
@@ -374,25 +467,39 @@ def compute_checks(
     power_w: float,
     grid: dict,
     Bc: np.ndarray | None = None,
+    pol: str = "z-linear",
+    t_ref_s: float = 0.0,
+    expected_y_flux_w: float | None = None,
+    f_number: float | None = None,
 ) -> dict:
     """Derive the self-validation metadata from a computed field pack.
 
     Returns a ``checks`` dict with ``a_max``, ``a_max_expected``,
     ``chi_max_per_GeV``, ``power_conservation_rel_err`` and ``max_location_m``.
+    When ``f_number`` is provided, ``a_max_expected`` is additionally scaled by the
+    truncated bi-dipole aperture factor
+    ``sqrt((8 - (1 + cos zeta)^3) / 8)`` with ``zeta = f_number_to_theta_max(f_number)``
+    (matching ``src.particles.fields._truncated_bidipole_kappa``).
     """
+    _validate_pol(pol)
+    if not np.isfinite(power_w) or power_w <= 0.0:
+        raise ValueError(f"power_w must be finite and positive, got {power_w}")
+    if expected_y_flux_w is not None and not np.isfinite(expected_y_flux_w):
+        raise ValueError(f"expected_y_flux_w must be finite when provided, got {expected_y_flux_w}")
     omega = C.omega_from_lambda(lambda0_m)
     E_rel = C.relativistic_field_scale(omega)
 
     E = Ec[0]  # strip Nf axis -> (3, nz, ny, nx)
     B = None if Bc is None else Bc[0]
 
-    emag = np.abs(E)
-    idx = np.unravel_index(int(np.argmax(emag)), emag.shape)
-    comp, iz, iy, ix = (int(v) for v in idx)
-    a_max = float(emag[comp, iz, iy, ix] / E_rel)
+    # Evaluate the real instantaneous vector field at t_ref_s (matches src.particles).
+    e_ref = np.real(E * np.exp(1.0j * omega * t_ref_s))
+    e_mag = np.sqrt(np.sum(e_ref ** 2, axis=0))
+    iz, iy, ix = (int(v) for v in np.unravel_index(int(np.argmax(e_mag)), e_mag.shape))
+    a_max = float(e_mag[iz, iy, ix] / E_rel)
 
     # chi ~ 2 gamma |E_perp| / E_cr  (head-on collision, electron along +y).
-    e_perp = np.sqrt(np.abs(E[0]) ** 2 + np.abs(E[2]) ** 2)
+    e_perp = np.sqrt(e_ref[0] ** 2 + e_ref[2] ** 2)
     chi_max_per_gev = 2.0 * C.GAMMA_PER_GEV * float(np.max(e_perp)) / C.E_CRIT
 
     # Peak location in meters (centered-axis convention).
@@ -402,17 +509,26 @@ def compute_checks(
         float(grid["z0_m"] + iz * grid["dz_m"]),
     ]
 
-    # Power conservation across two different y planes.
+    # Energy conservation: the near-field Poynting flux through the focal plane
+    # must match the far-field power used for normalization (= power_w).  The
+    # residual reflects the finite transverse-grid truncation (beam wings
+    # outside the window), not a field error (the direct Debye B is exact).
     if B is not None:
-        nyy = E.shape[2]  # y axis of (3, nz, ny, nx)
-        p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=nyy // 2)
-        p1 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=max(nyy // 4, 0))
-        p_err = float(abs(p0 - p1) / p0) if p0 > 0.0 else 0.0
+        p0 = field_power_through_y_plane(E, B, grid["dx_m"], grid["dz_m"], iy=E.shape[2] // 2)
+        target_flux = -float(power_w) if expected_y_flux_w is None else float(expected_y_flux_w)
+        p_err = float(abs(p0 - target_flux) / power_w)
     else:
         p_err = 0.0
 
     # a0 is lambda-independent for a fixed f-number: a0 = eE/(mc omega) ~ sqrt(P).
-    a_max_expected = float(C.A_BIDIPOLE_1PW_1UM * np.sqrt(power_w / 1.0e15))
+    pol_scale = 1.0 / np.sqrt(2.0) if pol == "circular" else 1.0
+    aperture_factor = 1.0
+    if f_number is not None:
+        zeta = f_number_to_theta_max(f_number)
+        aperture_factor = math.sqrt(max(0.0, (8.0 - (1.0 + math.cos(zeta)) ** 3) / 8.0))
+    a_max_expected = float(
+        C.A_BIDIPOLE_1PW_1UM * pol_scale * np.sqrt(power_w / 1.0e15) * aperture_factor
+    )
 
     return {
         "a_max": a_max,
@@ -423,3 +539,103 @@ def compute_checks(
     }
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Realistic optical pipeline: Gaussian beam + apodizer + mirror reflection.
+# --------------------------------------------------------------------------- #
+def mirror_reflection_far_field(
+    n: np.ndarray,
+    *,
+    f_number: float,
+    incident_amplitude: Callable[[np.ndarray], np.ndarray],
+    pol: str = "z-linear",
+) -> np.ndarray:
+    """Reflect a polarized collimated beam off the parabola -> far field.
+
+    Maps the mirror radius ``R = 2 L tan(theta/2)`` to the ray direction ``n``, applies
+    the local-normal polarization reflection ``E^p = E - 2 (E . N) N`` and the
+    energy-conserving amplitude apodization ``2 / (1 + cos(theta))`` of the parabolic
+    mirror.
+
+    Parameters
+    ----------
+    n : np.ndarray, shape (..., 3)
+        Unit ray-propagation vector of the reflected ray: the plane-wave kernel
+        ``exp(-i k n . r)`` under ``exp(+i omega t)`` propagates along ``+n``. The
+        reflecting mirror point sits at ``-n`` from the focus (origin inversion), so
+        ``n_y < 0`` for ``theta < pi/2``; backward rays with ``n_y > 0`` are supported
+        for ``f_number < 0.25`` up to ``theta < pi``.
+    f_number : float
+        Mirror f-number ``L/(2 R_max)`` (defines the aperture ``theta_max``).
+    incident_amplitude : callable
+        ``incident_amplitude(r) -> amplitude`` at normalized radius ``r = R/R_max``.
+    pol : str
+        Incident polarization: ``"z-linear"`` (default) or ``"circular"``
+        (``z_hat + i x_hat`` superposition).
+
+    Returns
+    -------
+    np.ndarray, shape (..., 3)
+        Far-field electric phasor ``(Ex, Ey, Ez)`` (dimensionless shape).
+    """
+    _validate_pol(pol)
+    ny = n[..., 1]
+    cos_theta = np.clip(-ny, -1.0, 1.0)  # n_y = -cos(theta)
+    denom = 1.0 + cos_theta
+    if np.any(denom <= 0.0):
+        raise ValueError("Ray at theta=pi (n_y=+1) is singular for parabolic mirror")
+    theta = np.arccos(cos_theta)
+    theta_max = f_number_to_theta_max(f_number)
+    r_over_rmax = np.tan(theta / 2.0) / np.tan(theta_max / 2.0)
+
+    amp = np.asarray(incident_amplitude(r_over_rmax))
+    if pol == "z-linear":
+        E_in = np.zeros(n.shape, dtype=np.result_type(n.dtype, amp.dtype))
+        E_in[..., 2] = amp
+    else:
+        E_in = np.zeros(n.shape, dtype=np.complex128)
+        E_in[..., 2] = amp
+        E_in[..., 0] = 1j * amp
+    E_refl = reflect(E_in, mirror_normal(n))
+    apod = 2.0 / denom
+    return E_refl * apod[..., None]
+
+
+def ideal_far_field(n: np.ndarray, *, f_number: float, pol: str = "z-linear") -> np.ndarray:
+    """Ideal Sheppard-Larkin far field, obtained by reflecting I^p(R) (eq. 13).
+
+    This reproduces :func:`bi_dipole_far_field` (eqs. 9-10) up to a constant factor,
+    which is a self-consistency check of the mirror-reflection pipeline.
+    """
+    from .gaussian import ideal_incident_amplitude
+
+    return mirror_reflection_far_field(
+        n,
+        f_number=f_number,
+        incident_amplitude=lambda r: ideal_incident_amplitude(r, f_number=f_number),
+        pol=pol,
+    )
+
+
+def gaussian_far_field(
+    n: np.ndarray,
+    *,
+    f_number: float,
+    w0_over_rmax: float = 0.7,
+    apod_order: float = 8.0,
+    pol: str = "z-linear",
+) -> np.ndarray:
+    """Realistic far field: a Gaussian beam shaped by an apodizer, reflected off the
+    parabolic mirror.  This is the full optical pipeline (input beam + optical system).
+    """
+    from .gaussian import gaussian_incident_amplitude
+
+    return mirror_reflection_far_field(
+        n,
+        f_number=f_number,
+        incident_amplitude=lambda r: gaussian_incident_amplitude(
+            r, w0_over_rmax=w0_over_rmax, apod_order=apod_order
+        ),
+        pol=pol,
+    )

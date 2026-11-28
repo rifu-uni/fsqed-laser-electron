@@ -42,6 +42,25 @@ KAPPA_BIDIPOLE_MAX: float = 5.25  # Eq. (1) optimal focusing constant
 # Lorentz factor gamma per GeV of electron energy (gamma = E / mc^2)
 GAMMA_PER_GEV: float = 1.0 / MC2_GEV  # ~ 1956.95
 
+# Reference laser configurations (SI units)
+PAPER_FIG4_LASER: dict[str, float] = {
+    "lambda0_m": 1.0e-6,
+    "power_w": 1.0e15,
+    "energy_gev": 1.0,
+}
+PAPER_FSQED_LASER: dict[str, float] = {
+    "lambda0_m": 0.8e-6,
+    "power_w": 1.0e15,
+    "tau_fwhm_s": 5.0 * (0.8e-6 / C_LIGHT),  # 5 optical cycles at 0.8 um (~13.34 fs, Sec. V)
+    "energy_gev": 1.0,
+}
+UNAL_TISAPPHIRE_LASER: dict[str, float] = {
+    "lambda0_m": 0.8e-6,
+    "power_w": 13.0e3,
+    "tau_fwhm_s": 170.0e-15,
+    "energy_gev": 1.0,
+}
+
 
 def omega_from_lambda(lambda_m: float) -> float:
     """Convert wavelength in meters to angular frequency omega_0 in rad/s."""

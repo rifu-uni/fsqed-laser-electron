@@ -226,3 +226,5 @@ __marimo__/
 fields/**/*.npz
 data/f*.npz
 GUIA_COMMIT.md
+.DS_Store
+.vscode/**

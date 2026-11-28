@@ -55,7 +55,7 @@
       "description": "Self-validation metadata; loader verifies a_max and power_conservation_rel_err against the loaded arrays and raises ValueError on mismatch.",
       "properties": {
         "a_max": {"type": "number", "exclusiveMinimum": 0, "description": "Peak electric field amplitude in a0 = e|E|/(mc*omega0), from the stack."},
-        "a_max_expected": {"type": "number", "exclusiveMinimum": 0, "description": "Theory reference: ~550*sqrt(P/1PW)*(lambda/1um) for LP bidipole."},
+        "a_max_expected": {"type": "number", "exclusiveMinimum": 0, "description": "Theory reference: ~551.5*sqrt(P/1PW) for LP bidipole (wavelength-independent; scaled by truncated aperture and 1/sqrt(2) for CP)."},
         "chi_max_per_GeV": {"type": "number", "exclusiveMinimum": 0, "description": "Peak chi per GeV of electron energy; compare with Fig. 4."},
         "power_conservation_rel_err": {"type": "number", "minimum": 0},
         "max_location_m": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}

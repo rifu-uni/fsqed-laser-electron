@@ -39,7 +39,13 @@ def estimate_shots_for_confidence(
     rel_accuracy: float = 0.01,
     confidence_sigma: float = 3.0,
 ) -> ShotEstimate:
-    """Estimate shots required to detect a relative rate deviation at given confidence level."""
+    """Estimate shots required to detect a relative rate deviation at given confidence level.
+
+    Note: ``sigma_cm2 * n_e_cm3 * tau_l_s * c_cm_s`` is treated as ``n_total_per_shot``,
+    following the algebraic convention in Olofsson & Gonoskov Sec. V, even though
+    ``sigma`` is defined from ``N_signal`` (not ``N_total``) in ``qed.py``'s
+    ``compute_sigma_and_eta``.
+    """
     for name, val in (
         ("sigma_cm2", sigma_cm2),
         ("eta", eta),
